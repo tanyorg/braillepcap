@@ -1,0 +1,11 @@
+[package]
+name = "ipv4map"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+ratatui = "0.26"
+crossterm = "0.27"
+pcap = "2.0"
+
