@@ -5,25 +5,36 @@ Terminal-based IPv4 traffic visualizer in Rust using Unicode Braille characters.
 ![Demo](./demo.gif)
 
 ## Features
-- Real-time packet capture display on a 256x256 IPv4 grid
+
+- Real-time packet capture display on a 224x256 IPv4 grid (Excludes Class D/E multicast & reserved space)
 - Support for pcap files and live interfaces
 - Regional Internet Registry (RIR) traffic statistics
 
+## Requirements
+
+- **Terminal Size**: Minimum **134 x 62** characters
+- **Font**: Terminal font with Unicode Braille Patterns support (`U+2800`–`U+28FF`)
+
 ## Supported Platforms
+
 Tested and confirmed working on:
+
 - macOS (Apple Silicon)
 - Ubuntu 24.04.4 LTS
 
 ## Prerequisites
 
 ### Ubuntu / Debian
+
 Build dependencies for the `pcap` library:
+
 ```bash
 sudo apt update
 sudo apt install -y libpcap-dev pkg-config
 ```
 
 ## Options
+
 | Option | Short | Description | Default |
 | --- | --- | --- | --- |
 | `--interface <INTERFACE>` | `-i` | Network interface for live capture | `en0` |
@@ -36,6 +47,7 @@ sudo apt install -y libpcap-dev pkg-config
 | `--version` | `-V` | Print version information | - |
 
 ## Usage
+
 ```bash
 # Live capture
 sudo cargo run --release -- -i en0
@@ -43,6 +55,22 @@ sudo cargo run --release -- -i en0
 # Read pcap file
 cargo run --release -- -r sample.pcap
 ```
+
+## How to Read the Grid
+
+- Vertical Axis (Y): First IPv4 Octet (0 – 223)
+- Horizontal Axis (X): Second IPv4 Octet (0 – 255)
+- Color Legend (Packet Frequency):
+  - 🩵 Cyan: 1 – 5 packets
+  - 🟩 Green: 6 – 20 packets
+  - 🟨 Yellow (Bold): 21 – 100 packets
+  - 🟥 Red (Bold): 101+ packets
+
+## Keybindings
+
+| Key | Action |
+| --- | --- |
+| q | Quit application |
 
 ## License
 
