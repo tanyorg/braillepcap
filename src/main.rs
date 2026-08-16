@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fuminori -Tany- Tanizaki
+
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -14,6 +17,8 @@ use ratatui::{
 use std::{
     collections::HashMap,
     io,
+    net::Ipv4Addr,
+    str::FromStr,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -54,7 +59,7 @@ pub struct Args {
     #[arg(short, long, value_delimiter = ' ')]
     pub port: Vec<u16>,
 
-    /// Exclude IP networks in CIDR (e.g., -o 10.0.0.0/8)
+    /// Exclude IP networks in CIDR notation (e.g., -o 10.0.0.0/8 192.168.0.0/16)
     #[arg(short, long, value_delimiter = ' ')]
     pub omit: Vec<String>,
 }
@@ -70,15 +75,6 @@ enum CapEngine {
     Live(Capture<pcap::Active>),
 }
 
-impl CapEngine {
-    fn get_datalink(&self) -> Linktype {
-        match self {
-            CapEngine::File(c) => c.get_datalink(),
-            CapEngine::Live(c) => c.get_datalink(),
-        }
-    }
-}
-
 // Expand tilde in path to full home directory path
 fn expand_path(path: &str) -> String {
     if path.starts_with("~/") {
@@ -89,31 +85,70 @@ fn expand_path(path: &str) -> String {
     path.to_string()
 }
 
-// Determine Layer 2 header offset based on data link type
-fn get_l2_offset(linktype: Linktype) -> usize {
-    match linktype.0 {
-        0 => 4,    // DLT_NULL / BSD Loopback (macOS lo0)
-        1 => 14,   // DLT_EN10MB / Ethernet
-        12 => 0,   // DLT_RAW
-        113 => 16, // DLT_LINUX_SLL
-        276 => 20, // DLT_LINUX_SLL2
-        _ => 14,
+// Parse CIDR string into (network_address_u32, subnet_mask_u32)
+fn parse_cidr(cidr: &str) -> Option<(u32, u32)> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        return None;
     }
+    let ip = Ipv4Addr::from_str(parts[0]).ok()?;
+    let prefix: u32 = parts[1].parse().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+
+    let mask = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
+    let net = u32::from(ip) & mask;
+    Some((net, mask))
 }
 
-// Parse IPv4 packet headers and return source octets (1st and 2nd octet)
-fn parse_packet(data: &[u8], l2_offset: usize, target_ports: &[u16]) -> Option<(u8, u8)> {
+// Parse IPv4 packet headers with dynamic L2/VLAN/PKTAP offset detection
+fn parse_packet(
+    data: &[u8],
+    linktype: Linktype,
+    target_ports: &[u16],
+    omit_nets: &[(u32, u32)],
+) -> Option<(u8, u8)> {
+    let mut l2_offset = match linktype.0 {
+        0 => 4,    // DLT_NULL / BSD Loopback (macOS lo0)
+        1 => 14,   // DLT_EN10MB / Standard Ethernet
+        12 => 0,   // DLT_RAW
+        113 => 16, // DLT_LINUX_SLL
+        149 => {   // DLT_APPLE_PKTAP (macOS header)
+            if data.len() < 8 {
+                return None;
+            }
+            let pktap_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+            pktap_len + 14
+        }
+        276 => 20, // DLT_LINUX_SLL2
+        _ => 14,
+    };
+
+    // Handle 802.1Q VLAN Tagging (0x8100) on Ethernet
+    if linktype.0 == 1 && data.len() >= 18 {
+        if data[12] == 0x81 && data[13] == 0x00 {
+            l2_offset = 18; // 14 + 4 bytes VLAN header
+        }
+    }
+
     if data.len() < l2_offset + 20 {
         return None;
     }
 
     let ip_data = &data[l2_offset..];
+    // Verify IPv4 version
     if (ip_data[0] >> 4) != 4 {
         return None;
     }
 
+    // Validate Internet Header Length (IHL) >= 20 bytes
     let ihl = ((ip_data[0] & 0x0F) * 4) as usize;
-    if ip_data.len() < ihl {
+    if ihl < 20 || ip_data.len() < ihl {
         return None;
     }
 
@@ -125,6 +160,17 @@ fn parse_packet(data: &[u8], l2_offset: usize, target_ports: &[u16]) -> Option<(
         return None;
     }
 
+    // Check omitted IPv4 subnets
+    if !omit_nets.is_empty() {
+        let src_ip_u32 = u32::from_be_bytes([ip_data[12], ip_data[13], ip_data[14], ip_data[15]]);
+        for &(net, mask) in omit_nets {
+            if (src_ip_u32 & mask) == net {
+                return None;
+            }
+        }
+    }
+
+    // Filter by port numbers
     if !target_ports.is_empty() {
         if proto != 6 && proto != 17 {
             return None;
@@ -179,6 +225,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
+    let omit_nets: Vec<(u32, u32)> = args
+        .omit
+        .iter()
+        .filter_map(|cidr_str| parse_cidr(cidr_str))
+        .collect();
+
     // Initialize capture engine before launching TUI mode to fail fast on errors
     let engine = if let Some(ref file_path) = args.read_file {
         let expanded = expand_path(file_path);
@@ -188,7 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let cap = Capture::from_device(iface.as_str())
             .map_err(|e| format!("Device error '{}': {}", iface, e))?
-            .promisc(true)
+            .promisc(false) // Set to false for macOS Wi-Fi stability
             .snaplen(65535)
             .timeout(10)
             .immediate_mode(true) // Disable BPF buffering on macOS for instant packet delivery
@@ -206,10 +258,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Vec::with_capacity(10000);
         let mut last_flush = Instant::now();
         let flush_interval = Duration::from_millis(16);
-        let l2_offset = get_l2_offset(engine.get_datalink());
 
         match engine {
             CapEngine::File(mut cap) => {
+                let datalink = cap.get_datalink();
                 let mut start_pcap_ts: Option<Duration> = None;
                 let start_real_ts = Instant::now();
                 let mut current_pcap_sec = 0u64;
@@ -243,11 +295,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     pcap_sec_count += 1;
 
-                    if let Some((oct1, oct2)) = parse_packet(packet.data, l2_offset, &ports) {
+                    if let Some((oct1, oct2)) = parse_packet(packet.data, datalink, &ports, &omit_nets) {
                         batch.push((oct1, oct2));
                     }
 
-                    if last_flush.elapsed() >= flush_interval || pps_to_send.is_some() {
+                    if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval || pps_to_send.is_some() {
                         let count = batch.len();
                         if tx.send(BatchUpdate {
                             dots: std::mem::take(&mut batch),
@@ -269,12 +321,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             CapEngine::Live(mut cap) => {
-                while let Ok(packet) = cap.next_packet() {
-                    if let Some((oct1, oct2)) = parse_packet(packet.data, l2_offset, &ports) {
-                        batch.push((oct1, oct2));
+                let datalink = cap.get_datalink();
+                loop {
+                    match cap.next_packet() {
+                        Ok(packet) => {
+                            if let Some((oct1, oct2)) = parse_packet(packet.data, datalink, &ports, &omit_nets) {
+                                batch.push((oct1, oct2));
+                            }
+                        }
+                        Err(pcap::Error::TimeoutExpired) => {
+                            // Ignore timeout on macOS BPF and keep capturing
+                        }
+                        Err(_) => break, // Exit on unrecoverable error or interface down
                     }
 
-                    if last_flush.elapsed() >= flush_interval {
+                    if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval {
                         let count = batch.len();
                         if tx.send(BatchUpdate {
                             dots: std::mem::take(&mut batch),
@@ -374,7 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 format!(" [Ports: {:?}]", args.port)
             };
-            let title = format!(" IPv4 Traffic Map [{}]{} ", mode_label, port_ind);
+            let title = format!(" BraillePcap [{}]{} ", mode_label, port_ind);
             buf.set_string(0, 0, &title, Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 
             let header = "     0              32              64              96             128             160             192             224          255";
