@@ -1,4 +1,4 @@
-# braillepcap
+# BraillePcap
 
 Terminal-based IPv4 traffic visualizer in Rust using Unicode Braille characters.
 
@@ -17,3 +17,7 @@ sudo cargo run --release -- -i en0
 # Read pcap file
 cargo run --release -- -r sample.pcap
 
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
