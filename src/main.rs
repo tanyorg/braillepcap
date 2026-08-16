@@ -33,12 +33,12 @@ const BRAILLE_BIT_MAP: [[u16; 2]; 4] = [
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// Network interface for live capture
-    #[arg(short, long, default_value = "en0")]
-    pub interface: String,
+    /// Network interface for live capture (default: "en0")
+    #[arg(short, long, conflicts_with = "read_file")]
+    pub interface: Option<String>,
 
     /// Read PCAP file or '-' for stdin
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "interface")]
     pub read_file: Option<String>,
 
     /// Replay speed for PCAP file (0 = max speed / burst mode)
@@ -64,12 +64,36 @@ pub struct BatchUpdate {
     pub pps_stat: Option<usize>,
 }
 
+enum CapEngine {
+    File(Capture<pcap::Offline>),
+    Live(Capture<pcap::Active>),
+}
+
+impl CapEngine {
+    fn get_datalink(&self) -> Linktype {
+        match self {
+            CapEngine::File(c) => c.get_datalink(),
+            CapEngine::Live(c) => c.get_datalink(),
+        }
+    }
+}
+
+fn expand_path(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}{}", home, &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
 fn get_l2_offset(linktype: Linktype) -> usize {
-    match linktype {
-        Linktype::ETHERNET => 14,
-        Linktype::NULL => 4,
-        Linktype::RAW => 0,
-        Linktype::LINUX_SLL => 16,
+    match linktype.0 {
+        0 => 4,    // DLT_NULL / BSD Loopback (macOS lo0)
+        1 => 14,   // DLT_EN10MB / Ethernet
+        12 => 0,   // DLT_RAW
+        113 => 16, // DLT_LINUX_SLL
+        276 => 20, // DLT_LINUX_SLL2
         _ => 14,
     }
 }
@@ -147,24 +171,41 @@ fn get_color_and_style(pkt_count: usize) -> Style {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let (tx, rx) = mpsc::channel::<BatchUpdate>();
+    let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
-    let iface = args.interface.clone();
-    let read_file = args.read_file.clone();
+    // キャプチャの初期化をTUI起動前に行い、失敗時は即エラー出力して終了させる
+    let engine = if let Some(ref file_path) = args.read_file {
+        let expanded = expand_path(file_path);
+        let cap = Capture::from_file(&expanded)
+            .map_err(|e| format!("Failed to open PCAP file '{}': {}", expanded, e))?;
+        CapEngine::File(cap)
+    } else {
+        let cap = Capture::from_device(iface.as_str())
+            .map_err(|e| format!("Device error '{}': {}", iface, e))?
+            .promisc(true)
+            .snaplen(65535)
+            .timeout(10)
+            .immediate_mode(true) // macOS (BPF) でのバッファリング即時配信設定
+            .open()
+            .map_err(|e| format!("Failed to open interface '{}': {}. (Try running with sudo)", iface, e))?;
+        CapEngine::Live(cap)
+    };
+
+    let (tx, rx) = mpsc::channel::<BatchUpdate>();
     let ports = args.port.clone();
     let speed = args.speed;
 
+    // パケットキャプチャスレッド
     thread::spawn(move || {
         let mut batch = Vec::with_capacity(10000);
         let mut last_flush = Instant::now();
         let flush_interval = Duration::from_millis(16);
+        let l2_offset = get_l2_offset(engine.get_datalink());
 
-        if let Some(file_path) = read_file {
-            if let Ok(mut cap) = Capture::from_file(&file_path) {
-                let l2_offset = get_l2_offset(cap.get_datalink());
+        match engine {
+            CapEngine::File(mut cap) => {
                 let mut start_pcap_ts: Option<Duration> = None;
                 let start_real_ts = Instant::now();
-
                 let mut current_pcap_sec = 0u64;
                 let mut pcap_sec_count = 0usize;
 
@@ -221,30 +262,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
             }
-        } else if let Ok(mut cap) = Capture::from_device(iface.as_str())
-            .and_then(|c| c.promisc(true).snaplen(65535).timeout(10).open())
-        {
-            let l2_offset = get_l2_offset(cap.get_datalink());
-            while let Ok(packet) = cap.next_packet() {
-                if let Some((oct1, oct2)) = parse_packet(packet.data, l2_offset, &ports) {
-                    batch.push((oct1, oct2));
-                }
-
-                if last_flush.elapsed() >= flush_interval {
-                    let count = batch.len();
-                    if tx.send(BatchUpdate {
-                        dots: std::mem::take(&mut batch),
-                        count,
-                        pps_stat: None,
-                    }).is_err() {
-                        break;
+            CapEngine::Live(mut cap) => {
+                while let Ok(packet) = cap.next_packet() {
+                    if let Some((oct1, oct2)) = parse_packet(packet.data, l2_offset, &ports) {
+                        batch.push((oct1, oct2));
                     }
-                    last_flush = Instant::now();
+
+                    if last_flush.elapsed() >= flush_interval {
+                        let count = batch.len();
+                        if tx.send(BatchUpdate {
+                            dots: std::mem::take(&mut batch),
+                            count,
+                            pps_stat: None,
+                        }).is_err() {
+                            break;
+                        }
+                        last_flush = Instant::now();
+                    }
                 }
             }
         }
     });
 
+    // ターミナル初期化
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -263,7 +303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode_label = if let Some(ref f) = args.read_file {
         format!("PCAP: {}", f)
     } else {
-        format!("Live: {}", args.interface)
+        format!("Live: {}", iface)
     };
 
     loop {

@@ -1,11 +1,19 @@
 [package]
-name = "ipv4map"
+name = "braillepcap"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "IPv4 Traffic Visualization in Braille"
+authors = ["tany"]
+readme = "README.md"
+keywords = ["pcap", "tui", "network", "braille", "visualization"]
+categories = ["network-programming", "command-line-utilities"]
+
+[[bin]]
+name = "braillepcap"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 ratatui = "0.26"
 crossterm = "0.27"
 pcap = "2.0"
-
