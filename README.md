@@ -16,7 +16,7 @@ sudo cargo run --release -- -i en0
 
 # Read pcap file
 cargo run --release -- -r sample.pcap
-
+```
 
 ## License
 
