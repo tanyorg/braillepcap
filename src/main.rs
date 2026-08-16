@@ -23,6 +23,7 @@ const REQ_COLS: u16 = 134;
 const REQ_ROWS: u16 = 62;
 const GRID_COLS: [usize; 7] = [16, 32, 48, 64, 80, 96, 112];
 
+// Bit pattern mapping for Unicode Braille characters (2x4 matrix)
 const BRAILLE_BIT_MAP: [[u16; 2]; 4] = [
     [0x01, 0x08],
     [0x02, 0x10],
@@ -78,6 +79,7 @@ impl CapEngine {
     }
 }
 
+// Expand tilde in path to full home directory path
 fn expand_path(path: &str) -> String {
     if path.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -87,6 +89,7 @@ fn expand_path(path: &str) -> String {
     path.to_string()
 }
 
+// Determine Layer 2 header offset based on data link type
 fn get_l2_offset(linktype: Linktype) -> usize {
     match linktype.0 {
         0 => 4,    // DLT_NULL / BSD Loopback (macOS lo0)
@@ -98,6 +101,7 @@ fn get_l2_offset(linktype: Linktype) -> usize {
     }
 }
 
+// Parse IPv4 packet headers and return source octets (1st and 2nd octet)
 fn parse_packet(data: &[u8], l2_offset: usize, target_ports: &[u16]) -> Option<(u8, u8)> {
     if data.len() < l2_offset + 20 {
         return None;
@@ -140,6 +144,7 @@ fn parse_packet(data: &[u8], l2_offset: usize, target_ports: &[u16]) -> Option<(
     Some((src_oct1, src_oct2))
 }
 
+// Map the first IPv4 octet to the corresponding Regional Internet Registry (RIR)
 pub fn get_iana_rir(octet1: u8) -> &'static str {
     match octet1 {
         0 => "Local",
@@ -160,6 +165,7 @@ pub fn get_iana_rir(octet1: u8) -> &'static str {
     }
 }
 
+// Determine terminal display style based on packet hit frequency
 fn get_color_and_style(pkt_count: usize) -> Style {
     match pkt_count {
         0..=5 => Style::default().fg(Color::Cyan),
@@ -173,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
-    // キャプチャの初期化をTUI起動前に行い、失敗時は即エラー出力して終了させる
+    // Initialize capture engine before launching TUI mode to fail fast on errors
     let engine = if let Some(ref file_path) = args.read_file {
         let expanded = expand_path(file_path);
         let cap = Capture::from_file(&expanded)
@@ -185,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .promisc(true)
             .snaplen(65535)
             .timeout(10)
-            .immediate_mode(true) // macOS (BPF) でのバッファリング即時配信設定
+            .immediate_mode(true) // Disable BPF buffering on macOS for instant packet delivery
             .open()
             .map_err(|e| format!("Failed to open interface '{}': {}. (Try running with sudo)", iface, e))?;
         CapEngine::Live(cap)
@@ -195,7 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ports = args.port.clone();
     let speed = args.speed;
 
-    // パケットキャプチャスレッド
+    // Background capture thread with batching and clock synchronization
     thread::spawn(move || {
         let mut batch = Vec::with_capacity(10000);
         let mut last_flush = Instant::now();
@@ -284,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // ターミナル初期化
+    // Terminal display setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -306,6 +312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("Live: {}", iface)
     };
 
+    // Main rendering loop
     loop {
         let now = Instant::now();
 
@@ -342,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_stats_calc = now;
         }
 
+        // Purge expired active dots and historical cell records
         active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
         cell_history.retain(|_, timestamps| {
             timestamps.retain(|t| now.duration_since(*t) < hold_duration);
@@ -391,6 +399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // Map IP addresses to Unicode Braille bitmasks
             let mut cell_masks: HashMap<(usize, usize), u16> = HashMap::new();
             for &(oct1, oct2) in active_dots.keys() {
                 let cy = (oct1 / 4) as usize;
@@ -402,6 +411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *cell_masks.entry((cx, cy)).or_insert(0) |= bit_val;
             }
 
+            // Render Braille characters to terminal buffer
             for ((cx, cy), mask) in cell_masks {
                 let scr_x = (cx + 5) as u16;
                 let scr_y = (cy + 3) as u16;
@@ -413,6 +423,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
             }
 
+            // Render bottom status bar with RIR statistics
             let total_rir_pkts: usize = rir_counter.values().sum();
             let rir_text = if total_rir_pkts > 0 {
                 let mut sorted_rirs: Vec<(&&str, &usize)> = rir_counter.iter().collect();
@@ -434,6 +445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(16));
     }
 
+    // Restore terminal configuration on exit
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
