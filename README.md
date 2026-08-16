@@ -17,10 +17,12 @@ Tested and confirmed working on:
 ## Options
 | Option | Short | Description | Default |
 | --- | --- | --- | --- |
-| `--interface <NAME>` | `-i` | Network interface to capture from | - |
-| `--read-pcap <FILE>` | `-r` | Read packets from a pcap file | - |
-| `--promisc` | `-p` | Enable promiscuous mode | `false` |
-| `--snapshot-len <LEN>` | `-s` | Snapshot length (bytes) | `65535` |
+| `--interface <INTERFACE>` | `-i` | Network interface for live capture | `en0` |
+| `--read-file <FILE>` | `-r` | Read PCAP file or '-' for stdin | - |
+| `--speed <SPEED>` | `-s` | Replay speed for PCAP file (0 = max speed) | `1.0` |
+| `--hold-time <SECS>` | `-t` | Dot persistence duration in seconds | `0.5` |
+| `--port <PORTS...>` | `-p` | Filter by port numbers (e.g., `-p 80 443`) | - |
+| `--omit <CIDR...>` | `-o` | Exclude IP networks in CIDR notation | - |
 | `--help` | `-h` | Print help information | - |
 | `--version` | `-V` | Print version information | - |
 
