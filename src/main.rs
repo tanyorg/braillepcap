@@ -58,10 +58,10 @@ pub struct Args {
     pub omit: Vec<String>,
 }
 
-/// Batch update sent from capture thread to UI thread
 pub struct BatchUpdate {
     pub dots: Vec<(u8, u8)>,
     pub count: usize,
+    pub pps_stat: Option<usize>,
 }
 
 fn get_l2_offset(linktype: Linktype) -> usize {
@@ -154,11 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ports = args.port.clone();
     let speed = args.speed;
 
-    // High-performance Packet Capture Thread with Batching
     thread::spawn(move || {
         let mut batch = Vec::with_capacity(10000);
         let mut last_flush = Instant::now();
-        let flush_interval = Duration::from_millis(16); // Flush ~60 times per sec
+        let flush_interval = Duration::from_millis(16);
 
         if let Some(file_path) = read_file {
             if let Ok(mut cap) = Capture::from_file(&file_path) {
@@ -166,13 +165,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut start_pcap_ts: Option<Duration> = None;
                 let start_real_ts = Instant::now();
 
+                let mut current_pcap_sec = 0u64;
+                let mut pcap_sec_count = 0usize;
+
                 while let Ok(packet) = cap.next_packet() {
-                    let pkt_ts = Duration::new(
-                        packet.header.ts.tv_sec as u64,
-                        (packet.header.ts.tv_usec * 1000) as u32,
-                    );
+                    let pkt_sec = packet.header.ts.tv_sec as u64;
+                    if current_pcap_sec == 0 {
+                        current_pcap_sec = pkt_sec;
+                    }
+
+                    let mut pps_to_send = None;
+                    if pkt_sec > current_pcap_sec {
+                        pps_to_send = Some(pcap_sec_count);
+                        pcap_sec_count = 0;
+                        current_pcap_sec = pkt_sec;
+                    }
 
                     if speed > 0.0 {
+                        let pkt_ts = Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
                         if start_pcap_ts.is_none() {
                             start_pcap_ts = Some(pkt_ts);
                         }
@@ -184,21 +194,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    pcap_sec_count += 1;
+
                     if let Some((oct1, oct2)) = parse_packet(packet.data, l2_offset, &ports) {
                         batch.push((oct1, oct2));
                     }
 
-                    if last_flush.elapsed() >= flush_interval {
+                    if last_flush.elapsed() >= flush_interval || pps_to_send.is_some() {
                         let count = batch.len();
-                        if tx.send(BatchUpdate { dots: std::mem::take(&mut batch), count }).is_err() {
+                        if tx.send(BatchUpdate {
+                            dots: std::mem::take(&mut batch),
+                            count,
+                            pps_stat: pps_to_send,
+                        }).is_err() {
                             break;
                         }
                         last_flush = Instant::now();
                     }
                 }
-                if !batch.is_empty() {
+                if !batch.is_empty() || pcap_sec_count > 0 {
                     let count = batch.len();
-                    let _ = tx.send(BatchUpdate { dots: batch, count });
+                    let _ = tx.send(BatchUpdate {
+                        dots: batch,
+                        count,
+                        pps_stat: Some(pcap_sec_count),
+                    });
                 }
             }
         } else if let Ok(mut cap) = Capture::from_device(iface.as_str())
@@ -212,7 +232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if last_flush.elapsed() >= flush_interval {
                     let count = batch.len();
-                    if tx.send(BatchUpdate { dots: std::mem::take(&mut batch), count }).is_err() {
+                    if tx.send(BatchUpdate {
+                        dots: std::mem::take(&mut batch),
+                        count,
+                        pps_stat: None,
+                    }).is_err() {
                         break;
                     }
                     last_flush = Instant::now();
@@ -221,7 +245,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Terminal Initialization
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -254,9 +277,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Receive Batches
         while let Ok(update) = rx.try_recv() {
             packet_count += update.count;
+
+            if let Some(exact_pps) = update.pps_stat {
+                pps = exact_pps;
+            }
 
             for (oct1, oct2) in update.dots {
                 active_dots.insert((oct1, oct2), now);
@@ -270,7 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
+        if args.read_file.is_none() && now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
             pps = packet_count;
             packet_count = 0;
             last_stats_calc = now;
