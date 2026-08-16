@@ -14,6 +14,15 @@ Tested and confirmed working on:
 - macOS (Apple Silicon)
 - Ubuntu 24.04.4 LTS
 
+## Prerequisites
+
+### Ubuntu / Debian
+Build dependencies for the `pcap` library:
+```bash
+sudo apt update
+sudo apt install -y libpcap-dev pkg-config
+```
+
 ## Options
 | Option | Short | Description | Default |
 | --- | --- | --- | --- |
