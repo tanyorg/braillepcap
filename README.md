@@ -25,5 +25,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Supported Platforms
 
 Tested and confirmed working on:
-- macOS (Apple Silicon / Intel)
+- macOS
 - Ubuntu 24.04.4 LTS
