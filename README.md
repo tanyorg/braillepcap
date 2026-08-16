@@ -21,3 +21,9 @@ cargo run --release -- -r sample.pcap
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Supported Platforms
+
+Tested and confirmed working on:
+- macOS (Apple Silicon / Intel)
+- Ubuntu 24.04.4 LTS
