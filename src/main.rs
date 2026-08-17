@@ -450,13 +450,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             buf.set_string(0, 2, &top_border, Style::default());
             buf.set_string(0, 59, &top_border, Style::default());
 
+            // 1. Draw outer frame and grid lines (DarkGray for vertical grid lines)
             for y in 0..56 {
                 let scr_y = (y + 3) as u16;
                 buf.set_string(0, scr_y, format!("{:>3}|", y * 4), Style::default());
                 buf.set_string(133, scr_y, "|", Style::default());
 
                 for cx in GRID_COLS {
-                    buf.set_string((cx + 5) as u16, scr_y, "│", Style::default().add_modifier(Modifier::DIM));
+                    buf.set_string(
+                        (cx + 5) as u16,
+                        scr_y,
+                        "│",
+                        Style::default().fg(Color::DarkGray),
+                    );
                 }
             }
 
@@ -472,7 +478,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *cell_masks.entry((cx, cy)).or_insert(0) |= bit_val;
             }
 
-            // Render Braille characters to terminal buffer
+            // 2. Overwrite grid cell with Braille character and packet color when active
             for ((cx, cy), mask) in cell_masks {
                 let scr_x = (cx + 5) as u16;
                 let scr_y = (cy + 3) as u16;
@@ -481,6 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pkt_freq = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
                 let style = get_color_and_style(pkt_freq);
 
+                // Overwrites vertical grid line character '│' and DarkGray color when overlapping
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
             }
 
