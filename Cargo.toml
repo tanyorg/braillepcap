@@ -1,6 +1,6 @@
 [package]
 name = "braillepcap"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "IPv4 Traffic Visualization using Unicode Braille sub-pixels for terminal graphics"
 authors = ["Fuminori -Tany- Tanizaki"]

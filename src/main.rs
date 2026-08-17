@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Fuminori -Tany- Tanizaki
 
+mod cli;
+mod packet;
+mod rir;
+mod ui;
+
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use pcap::{Capture, Linktype};
+use pcap::Capture;
 use ratatui::{
     backend::CrosstermBackend,
     style::{Color, Modifier, Style},
@@ -17,209 +22,15 @@ use ratatui::{
 use std::{
     collections::HashMap,
     io,
-    net::Ipv4Addr,
-    str::FromStr,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
-const REQ_COLS: u16 = 134;
-const REQ_ROWS: u16 = 62;
-const GRID_COLS: [usize; 7] = [16, 32, 48, 64, 80, 96, 112];
-
-// Bit pattern mapping for Unicode Braille characters (2x4 matrix)
-const BRAILLE_BIT_MAP: [[u16; 2]; 4] = [
-    [0x01, 0x08],
-    [0x02, 0x10],
-    [0x04, 0x20],
-    [0x40, 0x80],
-];
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    /// Network interface for live capture (default: "en0")
-    #[arg(short, long, conflicts_with = "read_file")]
-    pub interface: Option<String>,
-
-    /// Read PCAP file or '-' for stdin
-    #[arg(short, long, conflicts_with = "interface")]
-    pub read_file: Option<String>,
-
-    /// Replay speed for PCAP file (0 = max speed / burst mode)
-    #[arg(short, long, default_value_t = 1.0)]
-    pub speed: f64,
-
-    /// Dot persistence duration in seconds
-    #[arg(short = 't', long, default_value_t = 0.5)]
-    pub hold_time: f64,
-
-    /// Filter by port numbers (e.g., -p 80 443)
-    #[arg(short, long, value_delimiter = ' ')]
-    pub port: Vec<u16>,
-
-    /// Exclude IP networks in CIDR notation (e.g., -o 10.0.0.0/8 192.168.0.0/16)
-    #[arg(short, long, value_delimiter = ' ')]
-    pub omit: Vec<String>,
-}
-
-pub struct BatchUpdate {
-    pub dots: Vec<(u8, u8)>,
-    pub count: usize,
-    pub pps_stat: Option<usize>,
-}
-
-enum CapEngine {
-    File(Capture<pcap::Offline>),
-    Live(Capture<pcap::Active>),
-}
-
-// Expand tilde in path to full home directory path
-fn expand_path(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
-}
-
-// Parse CIDR string into (network_address_u32, subnet_mask_u32)
-fn parse_cidr(cidr: &str) -> Option<(u32, u32)> {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let ip = Ipv4Addr::from_str(parts[0]).ok()?;
-    let prefix: u32 = parts[1].parse().ok()?;
-    if prefix > 32 {
-        return None;
-    }
-
-    let mask = if prefix == 0 {
-        0
-    } else {
-        !0u32 << (32 - prefix)
-    };
-    let net = u32::from(ip) & mask;
-    Some((net, mask))
-}
-
-// Parse IPv4 packet headers with dynamic L2/VLAN/PKTAP offset detection
-fn parse_packet(
-    data: &[u8],
-    linktype: Linktype,
-    target_ports: &[u16],
-    omit_nets: &[(u32, u32)],
-) -> Option<(u8, u8)> {
-    let mut l2_offset = match linktype.0 {
-        0 => 4,    // DLT_NULL / BSD Loopback (macOS lo0)
-        1 => 14,   // DLT_EN10MB / Standard Ethernet
-        12 => 0,   // DLT_RAW
-        113 => 16, // DLT_LINUX_SLL
-        149 => {   // DLT_APPLE_PKTAP (macOS header)
-            if data.len() < 8 {
-                return None;
-            }
-            let pktap_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-            pktap_len + 14
-        }
-        276 => 20, // DLT_LINUX_SLL2
-        _ => 14,
-    };
-
-    // Handle 802.1Q VLAN Tagging (0x8100) on Ethernet
-    if linktype.0 == 1 && data.len() >= 18 {
-        if data[12] == 0x81 && data[13] == 0x00 {
-            l2_offset = 18; // 14 + 4 bytes VLAN header
-        }
-    }
-
-    if data.len() < l2_offset + 20 {
-        return None;
-    }
-
-    let ip_data = &data[l2_offset..];
-    // Verify IPv4 version
-    if (ip_data[0] >> 4) != 4 {
-        return None;
-    }
-
-    // Validate Internet Header Length (IHL) >= 20 bytes
-    let ihl = ((ip_data[0] & 0x0F) * 4) as usize;
-    if ihl < 20 || ip_data.len() < ihl {
-        return None;
-    }
-
-    let proto = ip_data[9];
-    let src_oct1 = ip_data[12];
-    let src_oct2 = ip_data[13];
-
-    if src_oct1 >= 224 {
-        return None;
-    }
-
-    // Check omitted IPv4 subnets
-    if !omit_nets.is_empty() {
-        let src_ip_u32 = u32::from_be_bytes([ip_data[12], ip_data[13], ip_data[14], ip_data[15]]);
-        for &(net, mask) in omit_nets {
-            if (src_ip_u32 & mask) == net {
-                return None;
-            }
-        }
-    }
-
-    // Filter by port numbers
-    if !target_ports.is_empty() {
-        if proto != 6 && proto != 17 {
-            return None;
-        }
-        if ip_data.len() < ihl + 4 {
-            return None;
-        }
-        let l4_data = &ip_data[ihl..];
-        let src_port = u16::from_be_bytes([l4_data[0], l4_data[1]]);
-        let dst_port = u16::from_be_bytes([l4_data[2], l4_data[3]]);
-
-        if !target_ports.contains(&src_port) && !target_ports.contains(&dst_port) {
-            return None;
-        }
-    }
-
-    Some((src_oct1, src_oct2))
-}
-
-// Map the first IPv4 octet to the corresponding Regional Internet Registry (RIR)
-pub fn get_iana_rir(octet1: u8) -> &'static str {
-    match octet1 {
-        0 => "Local",
-        10 => "Private",
-        127 => "Loopback",
-        224..=239 => "Multicast",
-        240..=255 => "Reserved",
-        1 | 14 | 27 | 36 | 39 | 42 | 43 | 49 | 58..=61 
-        | 101 | 103 | 106 | 110..=126 | 133 | 150 | 153 | 163 
-        | 171 | 175 | 180 | 182 | 183 | 202 | 203 | 210 | 211 
-        | 218..=223 => "APNIC",
-        2 | 5 | 25 | 31 | 37 | 46 | 51 | 53 | 57 | 62 
-        | 77..=95 | 109 | 141 | 145 | 151 | 176 | 178 | 185 
-        | 188 | 193..=195 | 212 | 213 | 217 => "RIPE NCC",
-        41 | 102 | 105 | 154 | 196 | 197 => "AFRINIC",
-        177 | 179 | 181 | 186 | 187 | 189..=191 | 200 | 201 => "LACNIC",
-        _ => "ARIN",
-    }
-}
-
-// Determine terminal display style based on packet hit frequency
-fn get_color_and_style(pkt_count: usize) -> Style {
-    match pkt_count {
-        0..=5 => Style::default().fg(Color::Cyan),
-        6..=20 => Style::default().fg(Color::Green),
-        21..=100 => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-    }
-}
+use cli::Args;
+use packet::{expand_path, parse_cidr, parse_packet, BatchUpdate, CapEngine};
+use rir::get_iana_rir;
+use ui::{get_color_and_style, BRAILLE_BIT_MAP, GRID_COLS, REQ_COLS, REQ_ROWS};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -240,10 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let cap = Capture::from_device(iface.as_str())
             .map_err(|e| format!("Device error '{}': {}", iface, e))?
-            .promisc(false) // Set to false for macOS Wi-Fi stability
+            .promisc(false)
             .snaplen(65535)
             .timeout(10)
-            .immediate_mode(true) // Disable BPF buffering on macOS for instant packet delivery
+            .immediate_mode(true)
             .open()
             .map_err(|e| format!("Failed to open interface '{}': {}. (Try running with sudo)", iface, e))?;
         CapEngine::Live(cap)
@@ -329,10 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 batch.push((oct1, oct2));
                             }
                         }
-                        Err(pcap::Error::TimeoutExpired) => {
-                            // Ignore timeout on macOS BPF and keep capturing
-                        }
-                        Err(_) => break, // Exit on unrecoverable error or interface down
+                        Err(pcap::Error::TimeoutExpired) => {}
+                        Err(_) => break,
                     }
 
                     if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval {
@@ -438,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let title = format!(" BraillePcap [{}]{} ", mode_label, port_ind);
             buf.set_string(0, 0, &title, Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 
-            let header = "     0              32              64              96             128             160             192             224          255";
+            let header = "     0              32              64              96             128             160             192             224             255";
             buf.set_string(0, 1, header, Style::default().add_modifier(Modifier::DIM));
 
             let mut top_border = "    +".to_string() + &"-".repeat(128) + "+";
@@ -487,7 +296,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pkt_freq = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
                 let style = get_color_and_style(pkt_freq);
 
-                // Overwrites vertical grid line character '│' and DarkGray color when overlapping
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
             }
 
