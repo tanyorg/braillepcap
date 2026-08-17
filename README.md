@@ -12,7 +12,7 @@ Terminal-based IPv4 traffic visualizer in Rust using Unicode Braille characters.
 
 ## Requirements
 
-- **Terminal Size**: Minimum **134 x 62** characters
+- **Terminal Size**: Minimum **134 x 63** characters
 - **Font**: Terminal font with Unicode Braille Patterns support (`U+2800`–`U+28FF`)
 
 ## Supported Platforms
