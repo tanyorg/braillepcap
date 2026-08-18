@@ -29,7 +29,7 @@ use std::{
 };
 
 use cli::Args;
-use packet::{expand_path, parse_cidr, parse_packet, BatchUpdate, CapEngine};
+use packet::{expand_path, parse_cidr, parse_packet, BatchUpdate, CapEngine, CidrMatcher};
 use rir::get_iana_rir;
 use ui::{get_color_and_style, BRAILLE_BIT_MAP, GRID_COLS, REQ_COLS, REQ_ROWS};
 
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
-    let omit_nets: Vec<(u32, u32)> = args
+    let omit_nets: Vec<CidrMatcher> = args
         .omit
         .iter()
         .filter_map(|cidr_str| parse_cidr(cidr_str))

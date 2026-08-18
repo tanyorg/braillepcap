@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Fuminori -Tany- Tanizaki
+
 pub mod capture;
 pub mod os;
 pub mod parser;
 
 pub use capture::{parse_packet, CapEngine};
-pub use parser::{expand_path, parse_cidr};
+pub use parser::{expand_path, parse_cidr, CidrMatcher};
 
 pub struct BatchUpdate {
     pub dots: Vec<(u8, u8)>,
