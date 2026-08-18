@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut packet_count = 0;
     let mut pps = 0;
     let mut last_stats_calc = Instant::now();
+    let mut is_paused = false;
 
     let mode_label = if let Some(ref f) = args.read_file {
         format!("PCAP: {}", f)
@@ -186,45 +187,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let now = Instant::now();
 
+        // Key event handling
         if event::poll(Duration::from_millis(1))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char(' ') => is_paused = !is_paused,
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        active_dots.clear();
+                        cell_history.clear();
+                        rir_counter.clear();
+                        packet_count = 0;
+                        pps = 0;
+                        last_stats_calc = Instant::now();
+                        terminal.clear()?;
+                    }
+                    _ => {}
                 }
             }
         }
 
-        while let Ok(update) = rx.try_recv() {
-            packet_count += update.count;
+        if is_paused {
+            // 一時停止中はバックグラウンドからの受信チャンネルを破棄してメモリ増大を防止
+            while rx.try_recv().is_ok() {}
+        } else {
+            while let Ok(update) = rx.try_recv() {
+                packet_count += update.count;
 
-            if let Some(exact_pps) = update.pps_stat {
-                pps = exact_pps;
+                if let Some(exact_pps) = update.pps_stat {
+                    pps = exact_pps;
+                }
+
+                for (oct1, oct2) in update.dots {
+                    active_dots.insert((oct1, oct2), now);
+
+                    let rir = get_iana_rir(oct1);
+                    *rir_counter.entry(rir).or_insert(0) += 1;
+
+                    let char_y = (oct1 / 4) as usize;
+                    let char_x = (oct2 / 2) as usize;
+                    cell_history.entry((char_x, char_y)).or_default().push(now);
+                }
             }
 
-            for (oct1, oct2) in update.dots {
-                active_dots.insert((oct1, oct2), now);
-
-                let rir = get_iana_rir(oct1);
-                *rir_counter.entry(rir).or_insert(0) += 1;
-
-                let char_y = (oct1 / 4) as usize;
-                let char_x = (oct2 / 2) as usize;
-                cell_history.entry((char_x, char_y)).or_default().push(now);
+            if args.read_file.is_none() && now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
+                pps = packet_count;
+                packet_count = 0;
+                last_stats_calc = now;
             }
-        }
 
-        if args.read_file.is_none() && now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
-            pps = packet_count;
-            packet_count = 0;
-            last_stats_calc = now;
+            // Purge expired active dots and historical cell records
+            active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
+            cell_history.retain(|_, timestamps| {
+                timestamps.retain(|t| now.duration_since(*t) < hold_duration);
+                !timestamps.is_empty()
+            });
         }
-
-        // Purge expired active dots and historical cell records
-        active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
-        cell_history.retain(|_, timestamps| {
-            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
-            !timestamps.is_empty()
-        });
 
         terminal.draw(|f| {
             let size = f.size();
@@ -244,7 +262,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 format!(" [Ports: {:?}]", args.port)
             };
-            let title = format!(" BraillePcap [{}]{} ", mode_label, port_ind);
+            let pause_ind = if is_paused { " [PAUSED]" } else { "" };
+            let title = format!(" BraillePcap [{}{}]{} ", mode_label, pause_ind, port_ind);
             buf.set_string(0, 0, &title, Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 
             let header = "     0              32              64              96             128             160             192             224             255";
