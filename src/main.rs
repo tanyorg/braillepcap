@@ -44,20 +44,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Initialize capture engine before launching TUI mode to fail fast on errors
-    let engine = if let Some(ref file_path) = args.read_file {
-        let expanded = expand_path(file_path);
-        let cap = Capture::from_file(&expanded)
-            .map_err(|e| format!("Failed to open PCAP file '{}': {}", expanded, e))?;
+    let engine = if let Some(ref file) = args.read_file {
+        let path = expand_path(file);
+        let cap = Capture::from_file(path)?;
         CapEngine::File(cap)
     } else {
-        let cap = Capture::from_device(iface.as_str())
-            .map_err(|e| format!("Device error '{}': {}", iface, e))?
-            .promisc(false)
-            .snaplen(65535)
-            .timeout(10)
-            .immediate_mode(true)
-            .open()
-            .map_err(|e| format!("Failed to open interface '{}': {}. (Try running with sudo)", iface, e))?;
+        let mut cap = Capture::from_device(iface.as_str())?
+            .buffer_size(args.buffer_size * 1024 * 1024)
+            .promisc(true)
+            .timeout(1000)
+            .open()?;
+        cap.setnonblock()?;
         CapEngine::Live(cap)
     };
 

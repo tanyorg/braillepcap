@@ -53,6 +53,7 @@ LIBPCAP_VER=1.10.0 cargo build --release
 | `--hold-time <SECS>` | `-t` | Dot persistence duration in seconds | `0.5` |
 | `--port <PORTS...>` | `-p` | Filter by port numbers (e.g., `-p 80 443`) | - |
 | `--omit <CIDR...>` | `-o` | Exclude IP networks in CIDR notation | - |
+| `--buffer-size <MB>` | `-b` | Capture buffer size in MB for live capture | `8` |
 | `--help` | `-h` | Print help information | - |
 | `--version` | `-V` | Print version information | - |
 
@@ -87,4 +88,3 @@ cargo run --release -- -r sample.pcap
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
