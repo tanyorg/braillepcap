@@ -70,6 +70,8 @@ cargo run --release -- -r sample.pcap
 
 | Key | Action |
 | --- | --- |
+| `Space` | Pause / Resume visualization |
+| `r` | Clear screen & reset packet counters |
 | q | Quit application |
 
 ## License
