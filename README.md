@@ -21,6 +21,7 @@ Tested and confirmed working on:
 
 - macOS (Apple Silicon)
 - Ubuntu 24.04.4 LTS
+- OpenBSD 7.9
 
 ## Prerequisites
 
@@ -31,6 +32,15 @@ Build dependencies for the `pcap` library:
 ```bash
 sudo apt update
 sudo apt install -y libpcap-dev pkg-config
+cargo build --release
+```
+
+### OpenBSD
+
+OpenBSD includes libpcap in its base system, but its version string format requires explicit version hints during Rust compilation:
+
+```bash
+LIBPCAP_VER=1.10.0 cargo build --release
 ```
 
 ## Options
