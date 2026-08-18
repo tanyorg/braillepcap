@@ -49,12 +49,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cap = Capture::from_file(path)?;
         CapEngine::File(cap)
     } else {
-        let mut cap = Capture::from_device(iface.as_str())?
-            .buffer_size(args.buffer_size * 1024 * 1024)
-            .promisc(true)
-            .timeout(1000)
-            .open()?;
-        cap.setnonblock()?;
+        let buf_bytes = args.buffer_size * 1024 * 1024;
+        let cap = Capture::from_device(iface.as_str())
+            .map_err(|e| format!("Device error '{}': {}", iface, e))?
+            .promisc(false)
+            .snaplen(65535)
+            .buffer_size(buf_bytes)
+            .timeout(10)
+            .immediate_mode(true)
+            .open()?
+            .setnonblock()?; // Chain setnonblock() directly after open()
+
         CapEngine::Live(cap)
     };
 
