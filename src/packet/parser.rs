@@ -56,13 +56,13 @@ pub fn parse_cidr(cidr: &str) -> Option<CidrMatcher> {
     Some(CidrMatcher::new(u32::from(ip), prefix))
 }
 
-/// Fast-path check using short-circuit evaluation to filter excluded IP networks
+/// Fast-path check using short-circuit evaluation to filter excluded source IP networks
 #[inline(always)]
-fn should_exclude(src_ip: u32, dst_ip: u32, omit_nets: &[CidrMatcher]) -> bool {
+fn should_exclude(src_ip: u32, omit_nets: &[CidrMatcher]) -> bool {
     if omit_nets.is_empty() {
         return false;
     }
-    omit_nets.iter().any(|m| m.matches(src_ip) || m.matches(dst_ip))
+    omit_nets.iter().any(|m| m.matches(src_ip))
 }
 
 /// Common IPv4 and L4 payload validation, filtering, and octet extraction logic
@@ -87,10 +87,9 @@ pub fn process_ip_payload(
     }
 
     let src_ip_u32 = u32::from_be_bytes([ip_data[12], ip_data[13], ip_data[14], ip_data[15]]);
-    let dst_ip_u32 = u32::from_be_bytes([ip_data[16], ip_data[17], ip_data[18], ip_data[19]]);
 
-    // Fast-path CIDR exclusion check (short-circuit evaluation for src/dst IP)
-    if should_exclude(src_ip_u32, dst_ip_u32, omit_nets) {
+    // Fast-path CIDR exclusion check for source IP
+    if should_exclude(src_ip_u32, omit_nets) {
         return None;
     }
 
