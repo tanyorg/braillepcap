@@ -6,6 +6,7 @@ mod packet;
 mod rir;
 mod ui;
 
+use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -116,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             dots: std::mem::take(&mut batch),
                             count,
                             pps_stat: pps_to_send,
+                            last_pcap_sec: Some(current_pcap_sec as i64),
                         }).is_err() {
                             break;
                         }
@@ -128,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         dots: batch,
                         count,
                         pps_stat: Some(pcap_sec_count),
+                        last_pcap_sec: Some(current_pcap_sec as i64),
                     });
                 }
             }
@@ -150,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             dots: std::mem::take(&mut batch),
                             count,
                             pps_stat: None,
+                            last_pcap_sec: None,
                         }).is_err() {
                             break;
                         }
@@ -176,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pps = 0;
     let mut last_stats_calc = Instant::now();
     let mut is_paused = false;
+    let mut current_time_str = String::from("-------------------");
 
     let mode_label = if let Some(ref f) = args.read_file {
         format!("PCAP: {}", f)
@@ -208,7 +213,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if is_paused {
-            // 一時停止中はバックグラウンドからの受信チャンネルを破棄してメモリ増大を防止
             while rx.try_recv().is_ok() {}
         } else {
             while let Ok(update) = rx.try_recv() {
@@ -216,6 +220,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some(exact_pps) = update.pps_stat {
                     pps = exact_pps;
+                }
+
+                if let Some(pcap_sec) = update.last_pcap_sec {
+                    if let Some(dt) = DateTime::from_timestamp(pcap_sec, 0) {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        current_time_str = local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                    }
                 }
 
                 for (oct1, oct2) in update.dots {
@@ -230,10 +241,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if args.read_file.is_none() && now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
-                pps = packet_count;
-                packet_count = 0;
-                last_stats_calc = now;
+            if args.read_file.is_none() {
+                current_time_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+                if now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
+                    pps = packet_count;
+                    packet_count = 0;
+                    last_stats_calc = now;
+                }
             }
 
             // Purge expired active dots and historical cell records
@@ -263,8 +278,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 format!(" [Ports: {:?}]", args.port)
             };
             let pause_ind = if is_paused { " [PAUSED]" } else { "" };
-            let title = format!(" BraillePcap [{}{}]{} ", mode_label, pause_ind, port_ind);
-            buf.set_string(0, 0, &title, Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+            let title_left = format!(" BraillePcap [{}{}]{} ", mode_label, pause_ind, port_ind);
+            let total_width = size.width as usize;
+            let time_len = current_time_str.len();
+
+            let pad_len = if total_width > title_left.len() + time_len {
+                total_width - title_left.len() - time_len
+            } else {
+                1
+            };
+            let full_title = format!("{}{}{}", title_left, " ".repeat(pad_len), current_time_str);
+
+            buf.set_string(0, 0, &full_title, Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
 
             let header = "     0              32              64              96             128             160             192             224             255";
             buf.set_string(0, 1, header, Style::default().add_modifier(Modifier::DIM));
