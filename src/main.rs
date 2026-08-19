@@ -262,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         terminal.draw(|f| {
-            let size = f.size();
+            let size = f.area();
             if size.width < REQ_COLS || size.height < REQ_ROWS {
                 let msg = Span::raw(format!(
                     "Screen too small: {}x{} (Required: {}x{})",
