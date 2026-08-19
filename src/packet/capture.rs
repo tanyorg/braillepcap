@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Fuminori -Tany- Tanizaki
 
-use pcap::{Capture, Linktype};
 use super::os::calculate_l2_offset;
 use super::parser::{process_ip_payload, CidrMatcher};
+use pcap::{Capture, Linktype};
 
 pub enum CapEngine {
     File(Capture<pcap::Offline>),

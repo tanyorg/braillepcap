@@ -95,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     if speed > 0.0 {
-                        let pkt_ts = Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
+                        let pkt_ts =
+                            Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
                         if start_pcap_ts.is_none() {
                             start_pcap_ts = Some(pkt_ts);
                         }
@@ -109,18 +110,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     pcap_sec_count += 1;
 
-                    if let Some((oct1, oct2)) = parse_packet(packet.data, datalink, &ports, &omit_nets) {
+                    if let Some((oct1, oct2)) =
+                        parse_packet(packet.data, datalink, &ports, &omit_nets)
+                    {
                         batch.push((oct1, oct2));
                     }
 
-                    if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval || pps_to_send.is_some() {
+                    if batch.len() >= 10000
+                        || last_flush.elapsed() >= flush_interval
+                        || pps_to_send.is_some()
+                    {
                         let count = batch.len();
-                        if tx.send(BatchUpdate {
-                            dots: std::mem::take(&mut batch),
-                            count,
-                            pps_stat: pps_to_send,
-                            last_pcap_sec: Some(current_pcap_sec as i64),
-                        }).is_err() {
+                        if tx
+                            .send(BatchUpdate {
+                                dots: std::mem::take(&mut batch),
+                                count,
+                                pps_stat: pps_to_send,
+                                last_pcap_sec: Some(current_pcap_sec as i64),
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                         last_flush = Instant::now();
@@ -141,7 +150,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     match cap.next_packet() {
                         Ok(packet) => {
-                            if let Some((oct1, oct2)) = parse_packet(packet.data, datalink, &ports, &omit_nets) {
+                            if let Some((oct1, oct2)) =
+                                parse_packet(packet.data, datalink, &ports, &omit_nets)
+                            {
                                 batch.push((oct1, oct2));
                             }
                         }
@@ -151,12 +162,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval {
                         let count = batch.len();
-                        if tx.send(BatchUpdate {
-                            dots: std::mem::take(&mut batch),
-                            count,
-                            pps_stat: None,
-                            last_pcap_sec: None,
-                        }).is_err() {
+                        if tx
+                            .send(BatchUpdate {
+                                dots: std::mem::take(&mut batch),
+                                count,
+                                pps_stat: None,
+                                last_pcap_sec: None,
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                         last_flush = Instant::now();
