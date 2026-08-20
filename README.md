@@ -85,6 +85,15 @@ cargo run --release -- -r sample.pcap
 | `r` | Clear screen & reset packet counters |
 | `q` | Quit application |
 
+## Technical Note: Braille Grid & Color Representation
+
+Due to terminal emulator specifications, **each character cell supports only a single foreground color**, whereas one Braille character contains an **8-dot grid (2x4)**.
+
+To balance spatial density with attribute visualization:
+
+- **Dots (Position):** Each of the 8 dots independently indicates traffic presence for its corresponding IP/subnet range.
+- **Color (Intensity):** The color of the character cell represents the **maximum (or average) traffic intensity (e.g., PPS)** among all active dots within that 2x4 cell.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
