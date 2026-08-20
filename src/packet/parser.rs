@@ -101,7 +101,9 @@ pub fn process_ip_payload(
         return None;
     }
 
-    // Filter by target port numbers
+    // Filter by target destination port numbers.
+    // Counting either src_port or dst_port double-counts duplex traffic and makes the
+    // "inbound-only" counter drift upward when responses are visible on the same interface.
     if !target_ports.is_empty() {
         let proto = ip_data[9];
         if proto != 6 && proto != 17 {
@@ -111,13 +113,60 @@ pub fn process_ip_payload(
             return None;
         }
         let l4_data = &ip_data[ihl..];
-        let src_port = u16::from_be_bytes([l4_data[0], l4_data[1]]);
         let dst_port = u16::from_be_bytes([l4_data[2], l4_data[3]]);
 
-        if !target_ports.contains(&src_port) && !target_ports.contains(&dst_port) {
+        if !target_ports.contains(&dst_port) {
             return None;
         }
     }
 
     Some((src_oct1, src_oct2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ipv4_packet(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, proto: u8) -> Vec<u8> {
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45; // Version 4, IHL 5
+        pkt[8] = 0x00;
+        pkt[9] = proto;
+        pkt[12..16].copy_from_slice(&src_ip);
+        pkt[16..20].copy_from_slice(&dst_ip);
+        pkt[20..22].copy_from_slice(&src_port.to_be_bytes());
+        pkt[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        pkt
+    }
+
+    #[test]
+    fn inbound_port_filter_uses_destination_port_only() {
+        let packet_to_target = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 54321, 443, 6);
+        assert!(process_ip_payload(&packet_to_target, &[443], &[]).is_some());
+
+        let response_from_target = make_ipv4_packet([10, 0, 0, 5], [192, 168, 1, 10], 443, 54321, 6);
+        assert!(process_ip_payload(&response_from_target, &[443], &[]).is_none());
+    }
+
+    #[test]
+    fn inbound_port_filter_rejects_non_tcp_udp_packets() {
+        let icmp_packet = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 0, 0, 1);
+        assert!(process_ip_payload(&icmp_packet, &[443], &[]).is_none());
+    }
+
+    #[test]
+    fn inbound_port_filter_accepts_matching_destination_port_for_udp() {
+        let udp_packet = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 55555, 53, 17);
+        assert!(process_ip_payload(&udp_packet, &[53], &[]).is_some());
+    }
+
+    #[test]
+    fn omit_filter_uses_source_ip_only() {
+        let omitted_net = Ipv4Addr::new(192, 168, 111, 0);
+        let packet = make_ipv4_packet([192, 168, 111, 10], [10, 0, 0, 5], 12345, 443, 6);
+        assert!(process_ip_payload(&packet, &[443], &[CidrMatcher::new(u32::from(omitted_net), 24)]).is_none());
+
+        let allowed_packet = make_ipv4_packet([192, 168, 110, 10], [10, 0, 0, 5], 12345, 443, 6);
+        assert!(process_ip_payload(&allowed_packet, &[443], &[CidrMatcher::new(u32::from(omitted_net), 24)]).is_some());
+    }
 }
