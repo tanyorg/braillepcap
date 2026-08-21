@@ -91,8 +91,10 @@ Due to terminal emulator specifications, **each character cell supports only a s
 
 To balance spatial density with attribute visualization:
 
-- **Dots (Position):** Each of the 8 dots independently indicates traffic presence for its corresponding IP/subnet range.
-- **Color (Intensity):** The color of the character cell represents the **maximum (or average) traffic intensity (e.g., PPS)** among all active dots within that 2x4 cell.
+- **Dots (Position):** Each of the 8 dots independently indicates whether traffic was seen in its corresponding IPv4 subrange within the current hold window.
+- **Color (Intensity):** The color of the character cell represents a **relative activity score** for that 2x4 cell, based on how many packet hits occurred in the current hold window. It is intentionally **not an exact per-/24 PPS measurement** for any individual dot or subnet.
+
+In other words, a red cell means the cell was significantly more active than a cyan cell in the current viewing window, but it does not mean the underlying /24 is generating a precise PPS value. For exact traffic rate information, use the global PPS counter in the status line.
 
 ## License
 

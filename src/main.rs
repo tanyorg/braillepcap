@@ -426,8 +426,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let scr_y = (cy + 3) as u16;
 
                 let braille_char = std::char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
-                let pkt_freq = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
-                let style = get_color_and_style(pkt_freq);
+                let cell_activity = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
+                // The cell color is a relative activity score over the hold window,
+                // not a literal per-/24 PPS readout for each dotted subnet.
+                let style = get_color_and_style(cell_activity);
 
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
             }
