@@ -16,13 +16,16 @@ use crossterm::{
 use pcap::Capture;
 use ratatui::{
     backend::CrosstermBackend,
+    layout::Rect,
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 use std::{
     collections::HashMap,
     io,
+    net::Ipv4Addr,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -80,6 +83,150 @@ fn validate_interface_name(iface: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+enum AppMode {
+    Main,
+    ZoomInput { value: String, error: Option<String> },
+    Detail { focus: (u8, u8) },
+}
+
+fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
+    let trimmed = value.trim();
+    let host = if let Some((left, prefix)) = trimmed.split_once('/') {
+        if prefix.trim() != "16" {
+            return Err("Only /16 ranges are supported in the detail zoom view.".to_string());
+        }
+        left
+    } else {
+        trimmed
+    };
+
+    let parts: Vec<&str> = host.split('.').collect();
+    match parts.len() {
+        2 => {
+            let first = parts[0]
+                .parse::<u8>()
+                .map_err(|_| "Invalid IPv4 address. Use a.b /16".to_string())?;
+            let second = parts[1]
+                .parse::<u8>()
+                .map_err(|_| "Invalid IPv4 address. Use a.b /16".to_string())?;
+            Ok((first, second))
+        }
+        4 => {
+            let ip = host
+                .parse::<Ipv4Addr>()
+                .map_err(|_| "Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string())?;
+            let octets = ip.octets();
+            Ok((octets[0], octets[1]))
+        }
+        _ => Err("Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string()),
+    }
+}
+
+fn detail_activity_cells(
+    focus: (u8, u8),
+    activity_by_network: &HashMap<(u8, u8), Vec<Instant>>,
+) -> Vec<((u8, u8), usize)> {
+    let mut cells = Vec::with_capacity(16);
+
+    let base_oct1 = focus.0;
+    let base_oct2 = focus.1;
+    for row in 0..4 {
+        for col in 0..4 {
+            let oct1 = base_oct1 + row as u8;
+            let oct2 = base_oct2 + col as u8;
+            let count = activity_by_network
+                .get(&(oct1, oct2))
+                .map(|timestamps| timestamps.len())
+                .unwrap_or(0);
+            cells.push(((oct1, oct2), count));
+        }
+    }
+
+    cells
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Instant};
+
+    use super::{detail_activity_cells, parse_zoom_target};
+
+    #[test]
+    fn parse_zoom_target_accepts_first_two_octets_in_16_form() {
+        assert_eq!(parse_zoom_target("13.112").unwrap(), (13, 112));
+        assert_eq!(parse_zoom_target("13.112/16").unwrap(), (13, 112));
+        assert_eq!(parse_zoom_target("192.168").unwrap(), (192, 168));
+        assert_eq!(parse_zoom_target("192.168/16").unwrap(), (192, 168));
+        assert!(parse_zoom_target("192.168.0.0/16").is_ok());
+        assert!(parse_zoom_target("192").is_err());
+        assert!(parse_zoom_target("256.168").is_err());
+    }
+
+    #[test]
+    fn detail_activity_cells_use_the_selected_braille_window() {
+        let activity = HashMap::from([
+            ((192, 168), vec![Instant::now(); 12]),
+            ((192, 169), vec![Instant::now(); 7]),
+            ((192, 170), vec![Instant::now(); 4]),
+            ((192, 171), vec![Instant::now(); 1]),
+            ((193, 168), vec![Instant::now(); 0]),
+            ((193, 169), vec![]),
+            ((193, 170), vec![Instant::now(); 9]),
+            ((193, 171), vec![Instant::now(); 2]),
+            ((194, 168), vec![Instant::now(); 3]),
+            ((194, 169), vec![Instant::now(); 5]),
+            ((194, 170), vec![Instant::now(); 8]),
+            ((194, 171), vec![Instant::now(); 6]),
+            ((195, 168), vec![Instant::now(); 11]),
+            ((195, 169), vec![Instant::now(); 10]),
+            ((195, 170), vec![Instant::now(); 13]),
+            ((195, 171), vec![Instant::now(); 14]),
+        ]);
+
+        let cells = detail_activity_cells((192, 168), &activity);
+        assert_eq!(cells.len(), 16);
+        assert_eq!(cells[0].1, 12);
+        assert_eq!(cells[1].1, 7);
+        assert_eq!(cells[2].1, 4);
+        assert_eq!(cells[3].1, 1);
+        assert_eq!(cells[4].1, 0);
+        assert_eq!(cells[5].1, 0);
+        assert_eq!(cells[6].1, 9);
+        assert_eq!(cells[7].1, 2);
+        assert_eq!(cells[8].1, 3);
+        assert_eq!(cells[9].1, 5);
+        assert_eq!(cells[10].1, 8);
+        assert_eq!(cells[11].1, 6);
+        assert_eq!(cells[12].1, 11);
+        assert_eq!(cells[13].1, 10);
+        assert_eq!(cells[14].1, 13);
+        assert_eq!(cells[15].1, 14);
+    }
+}
+
+fn reset_screen_state(
+    active_dots: &mut HashMap<(u8, u8), Instant>,
+    cell_history: &mut HashMap<(usize, usize), Vec<Instant>>,
+    network_activity: &mut HashMap<(u8, u8), Vec<Instant>>,
+    rir_counter: &mut HashMap<&'static str, usize>,
+    rir_delta: &mut HashMap<&'static str, usize>,
+    packet_count: &mut usize,
+    pps: &mut usize,
+    pps_window_start: &mut Instant,
+    last_stats_calc: &mut Instant,
+) {
+    active_dots.clear();
+    cell_history.clear();
+    network_activity.clear();
+    rir_counter.clear();
+    rir_delta.clear();
+    *packet_count = 0;
+    *pps = 0;
+    *pps_window_start = Instant::now();
+    *last_stats_calc = Instant::now();
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -172,10 +319,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     pcap_sec_count += 1;
 
-                    if let Some((oct1, oct2)) =
+                    if let Some((oct1, oct2, oct3)) =
                         parse_packet(packet.data, datalink, &ports, &omit_nets)
                     {
-                        batch.push((oct1, oct2));
+                        batch.push((oct1, oct2, oct3));
                     }
 
                     if batch.len() >= 10000
@@ -212,10 +359,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     match cap.next_packet() {
                         Ok(packet) => {
-                            if let Some((oct1, oct2)) =
+                            if let Some((oct1, oct2, oct3)) =
                                 parse_packet(packet.data, datalink, &ports, &omit_nets)
                             {
-                                batch.push((oct1, oct2));
+                                batch.push((oct1, oct2, oct3));
                             }
                         }
                         Err(pcap::Error::TimeoutExpired) => {}
@@ -263,13 +410,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut active_dots: HashMap<(u8, u8), Instant> = HashMap::new();
     let mut cell_history: HashMap<(usize, usize), Vec<Instant>> = HashMap::new();
+    let mut network_activity: HashMap<(u8, u8), Vec<Instant>> = HashMap::new();
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
+    let mut rir_delta: HashMap<&'static str, usize> = HashMap::new();
 
     let mut packet_count = 0;
     let mut pps = 0;
+    let mut pps_window_start = Instant::now();
+    let mut pps_accumulator = 0usize;
     let mut last_stats_calc = Instant::now();
+    let mut last_rir_flush = Instant::now();
+    let mut last_retain = Instant::now();
     let mut is_paused = false;
     let mut current_time_str = String::from("-------------------");
+    let mut app_mode = AppMode::Main;
 
     let mode_label = if let Some(ref f) = args.read_file {
         format!("PCAP: {}", f.display())
@@ -281,71 +435,188 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let now = Instant::now();
 
-        // Key event handling
         if event::poll(Duration::from_millis(1))? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char(' ') => is_paused = !is_paused,
-                    KeyCode::Char('r') | KeyCode::Char('R') => {
-                        active_dots.clear();
-                        cell_history.clear();
-                        rir_counter.clear();
-                        packet_count = 0;
-                        pps = 0;
-                        last_stats_calc = Instant::now();
-                        terminal.clear()?;
-                    }
-                    _ => {}
+                match &mut app_mode {
+                    AppMode::Main => match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char(' ') => is_paused = !is_paused,
+                        KeyCode::Char('z') | KeyCode::Char('Z') => {
+                            app_mode = AppMode::ZoomInput {
+                                value: String::new(),
+                                error: None,
+                            };
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            reset_screen_state(
+                                &mut active_dots,
+                                &mut cell_history,
+                                &mut network_activity,
+                                &mut rir_counter,
+                                &mut rir_delta,
+                                &mut packet_count,
+                                &mut pps,
+                                &mut pps_window_start,
+                                &mut last_stats_calc,
+                            );
+                            terminal.clear()?;
+                        }
+                        _ => {}
+                    },
+                    AppMode::ZoomInput { value, error } => match key.code {
+                        KeyCode::Esc => {
+                            app_mode = AppMode::Main;
+                            reset_screen_state(
+                                &mut active_dots,
+                                &mut cell_history,
+                                &mut network_activity,
+                                &mut rir_counter,
+                                &mut rir_delta,
+                                &mut packet_count,
+                                &mut pps,
+                                &mut pps_window_start,
+                                &mut last_stats_calc,
+                            );
+                            terminal.clear()?;
+                        }
+                        KeyCode::Enter => {
+                            match parse_zoom_target(value) {
+                                Ok((oct1, oct2)) => {
+                                    app_mode = AppMode::Detail {
+                                        focus: (oct1, oct2),
+                                    };
+                                }
+                                Err(msg) => {
+                                    *error = Some(msg);
+                                }
+                            }
+                        }
+                        KeyCode::Backspace | KeyCode::Delete => {
+                            value.pop();
+                            *error = None;
+                        }
+                        KeyCode::Char(c)
+                            if c == '\u{7}' || c == '\u{8}' || c == '\u{127}' =>
+                        {
+                            value.pop();
+                            *error = None;
+                        }
+                        KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' => {
+                            value.push(c);
+                            *error = None;
+                        }
+                        KeyCode::Char('q') => break,
+                        _ => {}
+                    },
+                    AppMode::Detail { .. } => match key.code {
+                        KeyCode::Esc => {
+                            app_mode = AppMode::Main;
+                            reset_screen_state(
+                                &mut active_dots,
+                                &mut cell_history,
+                                &mut network_activity,
+                                &mut rir_counter,
+                                &mut rir_delta,
+                                &mut packet_count,
+                                &mut pps,
+                                &mut pps_window_start,
+                                &mut last_stats_calc,
+                            );
+                            terminal.clear()?;
+                            terminal.flush()?;
+                        }
+                        KeyCode::Char('q') => break,
+                        _ => {}
+                    },
                 }
             }
         }
 
-        if is_paused {
-            while rx.try_recv().is_ok() {}
-        } else {
-            while let Ok(update) = rx.try_recv() {
-                packet_count += update.count;
+        match app_mode {
+            AppMode::Main => {
+                if is_paused {
+                    while rx.try_recv().is_ok() {}
+                } else {
+                    while let Ok(update) = rx.try_recv() {
+                        packet_count += update.count;
 
-                if let Some(exact_pps) = update.pps_stat {
-                    pps = exact_pps;
-                }
+                        if let Some(exact_pps) = update.pps_stat {
+                            pps = exact_pps;
+                            pps_accumulator = 0;
+                            pps_window_start = now;
+                        } else {
+                            pps_accumulator += update.count;
+                            if now.duration_since(pps_window_start) >= Duration::from_secs(1) {
+                                pps = pps_accumulator;
+                                pps_accumulator = 0;
+                                pps_window_start = now;
+                            }
+                        }
 
-                if let Some(pcap_sec) = update.last_pcap_sec {
-                    if let Some(dt) = DateTime::from_timestamp(pcap_sec, 0) {
-                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
-                        current_time_str = local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                        if let Some(pcap_sec) = update.last_pcap_sec {
+                            if let Some(dt) = DateTime::from_timestamp(pcap_sec, 0) {
+                                let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                                current_time_str = local_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+                            }
+                        }
+
+                        for (oct1, oct2, _oct3) in update.dots {
+                            active_dots.insert((oct1, oct2), now);
+                            network_activity.entry((oct1, oct2)).or_default().push(now);
+
+                            let rir = get_iana_rir(oct1);
+                            *rir_delta.entry(rir).or_insert(0) += 1;
+
+                            let char_y = (oct1 / 4) as usize;
+                            let char_x = (oct2 / 2) as usize;
+                            cell_history.entry((char_x, char_y)).or_default().push(now);
+                        }
+                    }
+
+                    if now.duration_since(last_rir_flush) >= Duration::from_secs(1) {
+                        for (rir, count) in rir_delta.drain() {
+                            *rir_counter.entry(rir).or_insert(0) += count;
+                        }
+                        last_rir_flush = now;
+                    }
+
+                    if args.read_file.is_none() {
+                        current_time_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+                        if now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
+                            packet_count = 0;
+                            last_stats_calc = now;
+                        }
+                    }
+
+                    if now.duration_since(last_retain) >= Duration::from_millis(500) {
+                        active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
+                        cell_history.retain(|_, timestamps| {
+                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
+                            !timestamps.is_empty()
+                        });
+                        network_activity.retain(|_, timestamps| {
+                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
+                            !timestamps.is_empty()
+                        });
+                        last_retain = now;
                     }
                 }
-
-                for (oct1, oct2) in update.dots {
-                    active_dots.insert((oct1, oct2), now);
-
-                    let rir = get_iana_rir(oct1);
-                    *rir_counter.entry(rir).or_insert(0) += 1;
-
-                    let char_y = (oct1 / 4) as usize;
-                    let char_x = (oct2 / 2) as usize;
-                    cell_history.entry((char_x, char_y)).or_default().push(now);
+            }
+            AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
+                while let Ok(update) = rx.try_recv() {
+                    for (oct1, oct2, _oct3) in update.dots {
+                        network_activity.entry((oct1, oct2)).or_default().push(now);
+                    }
+                    if now.duration_since(last_retain) >= Duration::from_millis(500) {
+                        network_activity.retain(|_, timestamps| {
+                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
+                            !timestamps.is_empty()
+                        });
+                        last_retain = now;
+                    }
                 }
             }
-
-            if args.read_file.is_none() {
-                current_time_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-                if now.duration_since(last_stats_calc) >= Duration::from_secs(1) {
-                    pps = packet_count;
-                    packet_count = 0;
-                    last_stats_calc = now;
-                }
-            }
-
-            // Purge expired active dots and historical cell records
-            active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
-            cell_history.retain(|_, timestamps| {
-                timestamps.retain(|t| now.duration_since(*t) < hold_duration);
-                !timestamps.is_empty()
-            });
         }
 
         terminal.draw(|f| {
@@ -392,7 +663,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             buf.set_string(0, 2, &top_border, Style::default());
             buf.set_string(0, 59, &top_border, Style::default());
 
-            // 1. Draw outer frame and grid lines (DarkGray for vertical grid lines)
             for y in 0..56 {
                 let scr_y = (y + 3) as u16;
                 buf.set_string(0, scr_y, format!("{:>3}|", y * 4), Style::default());
@@ -408,7 +678,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Map IP addresses to Unicode Braille bitmasks
             let mut cell_masks: HashMap<(usize, usize), u16> = HashMap::new();
             for &(oct1, oct2) in active_dots.keys() {
                 let cy = (oct1 / 4) as usize;
@@ -420,21 +689,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *cell_masks.entry((cx, cy)).or_insert(0) |= bit_val;
             }
 
-            // 2. Overwrite grid cell with Braille character and packet color when active
             for ((cx, cy), mask) in cell_masks {
                 let scr_x = (cx + 5) as u16;
                 let scr_y = (cy + 3) as u16;
 
                 let braille_char = std::char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
                 let cell_activity = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
-                // The cell color is a relative activity score over the hold window,
-                // not a literal per-/24 PPS readout for each dotted subnet.
                 let style = get_color_and_style(cell_activity);
 
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
             }
 
-            // Render bottom status bar with RIR statistics
             let total_rir_pkts: usize = rir_counter.values().sum();
             let rir_text = if total_rir_pkts > 0 {
                 let mut sorted_rirs: Vec<(&&str, &usize)> = rir_counter.iter().collect();
@@ -451,9 +716,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let status_text = format!(" PPS: {:<7} | {} ", pps, rir_text);
             buf.set_string(0, 60, status_text, Style::default());
+
+            match &app_mode {
+                AppMode::Main => {}
+                AppMode::ZoomInput { value, error } => {
+                    let area_width = 60;
+                    let area_height = 8;
+                    let area = Rect::new(
+                        size.width.saturating_sub(area_width) / 2,
+                        size.height.saturating_sub(area_height) / 2,
+                        area_width,
+                        area_height,
+                    );
+                    f.render_widget(Clear, area);
+                    let block = Block::default()
+                        .title("Zoom /16")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan));
+                    let mut lines = vec![
+                        Line::from("Enter the first two octets in /16 form (e.g. 10.10)"),
+                        Line::from(format!("> {}", value)),
+                    ];
+                    if let Some(err) = error {
+                        lines.push(Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))));
+                    }
+                    lines.push(Line::from("Esc: cancel   Enter: open detail view"));
+                    f.render_widget(block, area);
+                    let inner = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(2));
+                    f.render_widget(Paragraph::new(lines), inner);
+                }
+                AppMode::Detail { focus, .. } => {
+                    let area_width = 92;
+                    let area_height = 10;
+                    let area = Rect::new(
+                        size.width.saturating_sub(area_width) / 2,
+                        size.height.saturating_sub(area_height) / 2,
+                        area_width,
+                        area_height,
+                    );
+                    f.render_widget(Clear, area);
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow));
+                    let detail_activity = detail_activity_cells(*focus, &network_activity);
+                    let mut detail_lines = Vec::new();
+
+                    for row_idx in 0..4 {
+                        let mut cells = Vec::new();
+                        for col_idx in 0..4 {
+                            if !cells.is_empty() {
+                                cells.push(Span::raw(" |"));
+                            }
+                            let idx = row_idx * 4 + col_idx;
+                            let ((oct1, oct2), count) = detail_activity[idx];
+                            let label = format!("{}.{}.0.0/16", oct1, oct2);
+                            let score_style = get_color_and_style(count);
+                            let cell = format!("{:<15} {:>4}", label, count);
+                            cells.push(Span::styled(cell, score_style));
+                        }
+                        detail_lines.push(Line::from(cells));
+                    }
+
+                    detail_lines.push(Line::from(""));
+                    detail_lines.push(Line::from("Esc: return to main view"));
+                    f.render_widget(block, area);
+                    let inner = Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), area.height.saturating_sub(2));
+                    f.render_widget(Paragraph::new(detail_lines), inner);
+                }
+            }
         })?;
 
-        thread::sleep(Duration::from_millis(16));
+        thread::sleep(Duration::from_millis(33));
     }
 
     // Restore terminal configuration on exit

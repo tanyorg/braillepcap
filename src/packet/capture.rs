@@ -16,7 +16,7 @@ pub fn parse_packet(
     linktype: Linktype,
     target_ports: &[u16],
     omit_nets: &[CidrMatcher],
-) -> Option<(u8, u8)> {
+) -> Option<(u8, u8, u8)> {
     let l2_offset = calculate_l2_offset(linktype, data)?;
 
     if data.len() < l2_offset + 20 {

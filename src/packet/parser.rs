@@ -106,7 +106,7 @@ pub fn process_ip_payload(
     ip_data: &[u8],
     target_ports: &[u16],
     omit_nets: &[CidrMatcher],
-) -> Option<(u8, u8)> {
+) -> Option<(u8, u8, u8)> {
     if ip_data.len() < 20 {
         return None;
     }
@@ -131,6 +131,7 @@ pub fn process_ip_payload(
 
     let src_oct1 = ip_data[12];
     let src_oct2 = ip_data[13];
+    let src_oct3 = ip_data[14];
 
     // Exclude Class D (Multicast: 224-239) and Class E (Reserved: 240-255)
     if src_oct1 >= 224 {
@@ -156,7 +157,7 @@ pub fn process_ip_payload(
         }
     }
 
-    Some((src_oct1, src_oct2))
+    Some((src_oct1, src_oct2, src_oct3))
 }
 
 #[cfg(test)]
