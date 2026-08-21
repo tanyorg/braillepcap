@@ -33,23 +33,86 @@ use packet::{expand_path, parse_cidr, parse_packet, BatchUpdate, CapEngine, Cidr
 use rir::get_iana_rir;
 use ui::{get_color_and_style, BRAILLE_BIT_MAP, GRID_COLS, REQ_COLS, REQ_ROWS};
 
+fn has_root_privileges() -> bool {
+    #[cfg(target_family = "unix")]
+    {
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim() == "0"
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        true
+    }
+}
+
+fn validate_interface_name(iface: &str) -> Result<(), String> {
+    if iface.trim().is_empty() {
+        return Err("Interface name cannot be empty".to_string());
+    }
+
+    if iface.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\') {
+        return Err(format!("Invalid interface name: '{}'", iface));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let net_dir = std::path::Path::new("/sys/class/net");
+        let entries = std::fs::read_dir(net_dir)
+            .map_err(|_| format!("Unable to inspect system interfaces for '{}': /sys/class/net is not accessible", iface))?;
+
+        let valid = entries
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name() == iface);
+
+        if !valid {
+            return Err(format!(
+                "Interface '{}' does not exist on this system. Check /sys/class/net or pass a valid interface name.",
+                iface
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
+    if args.read_file.is_none() && !has_root_privileges() {
+        return Err("Live capture requires root privileges. Run with sudo or as root.".into());
+    }
+
+    validate_interface_name(&iface)?;
+
     let omit_nets: Vec<CidrMatcher> = args
         .omit
         .iter()
-        .filter_map(|cidr_str| parse_cidr(cidr_str))
-        .collect();
+        .map(|cidr_str| {
+            parse_cidr(cidr_str).map_err(|err| format!("Invalid omit CIDR '{}': {}", cidr_str, err))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let safe_buffer_size = args.buffer_size.clamp(1, 1024);
+    let buffer_size_mb = safe_buffer_size as usize;
+    let buf_bytes = buffer_size_mb
+        .checked_mul(1024 * 1024)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| format!("buffer size is too large: {}", buffer_size_mb))?;
 
     // Initialize capture engine before launching TUI mode to fail fast on errors
     let engine = if let Some(ref file) = args.read_file {
-        let path = expand_path(file);
+        let path = expand_path(file.to_string_lossy().as_ref())?;
         let cap = Capture::from_file(path)?;
         CapEngine::File(cap)
     } else {
-        let buf_bytes = args.buffer_size * 1024 * 1024;
         let cap = Capture::from_device(iface.as_str())
             .map_err(|e| format!("Device error '{}': {}", iface, e))?
             .promisc(false)
@@ -58,14 +121,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .timeout(10)
             .immediate_mode(true)
             .open()?
-            .setnonblock()?; // Chain setnonblock() directly after open()
+            .setnonblock()?;
 
         CapEngine::Live(cap)
     };
 
     let (tx, rx) = mpsc::channel::<BatchUpdate>();
     let ports = args.port.clone();
-    let speed = args.speed;
+    let replay_speed = args.speed;
 
     // Background capture thread with batching and clock synchronization
     thread::spawn(move || {
@@ -94,13 +157,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         current_pcap_sec = pkt_sec;
                     }
 
-                    if speed > 0.0 {
-                        let pkt_ts =
-                            Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
+                    if replay_speed > 0.0 {
+                        let pkt_ts = Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
                         if start_pcap_ts.is_none() {
                             start_pcap_ts = Some(pkt_ts);
                         }
-                        let pcap_elapsed = (pkt_ts - start_pcap_ts.unwrap()).div_f64(speed);
+                        let pcap_elapsed = (pkt_ts - start_pcap_ts.unwrap()).div_f64(replay_speed);
                         let real_elapsed = start_real_ts.elapsed();
 
                         if pcap_elapsed > real_elapsed {
@@ -187,7 +249,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let hold_duration = Duration::from_secs_f64(args.hold_time);
+    let hold_seconds = if args.hold_time.is_finite() {
+        args.hold_time.clamp(0.01, 60.0)
+    } else {
+        0.5
+    };
+    let hold_duration = Duration::from_secs_f64(hold_seconds);
+
+    let _speed = if args.speed.is_finite() {
+        args.speed.clamp(0.0, 1000.0)
+    } else {
+        1.0
+    };
     let mut active_dots: HashMap<(u8, u8), Instant> = HashMap::new();
     let mut cell_history: HashMap<(usize, usize), Vec<Instant>> = HashMap::new();
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
@@ -199,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_time_str = String::from("-------------------");
 
     let mode_label = if let Some(ref f) = args.read_file {
-        format!("PCAP: {}", f)
+        format!("PCAP: {}", f.display())
     } else {
         format!("Live: {}", iface)
     };

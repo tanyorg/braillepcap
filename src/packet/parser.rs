@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Fuminori -Tany- Tanizaki
 
-use std::{net::Ipv4Addr, str::FromStr};
+use std::{
+    net::Ipv4Addr,
+    path::{Component, PathBuf},
+    str::FromStr,
+};
 
 /// Pre-computed CIDR matcher for high-performance bitwise IP filtering
 #[derive(Debug, Clone, Copy)]
@@ -31,29 +35,61 @@ impl CidrMatcher {
     }
 }
 
-/// Expands tilde (~) in file paths to the user's home directory
-pub fn expand_path(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
+/// Expands tilde (~) in file paths to the user's home directory without allowing traversal.
+pub fn expand_path(path: &str) -> Result<PathBuf, String> {
+    if path == "-" {
+        return Ok(PathBuf::from("-"));
     }
-    path.to_string()
+
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
+    let expanded = if let Some(rest) = path.strip_prefix("~/") {
+        PathBuf::from(&home).join(rest)
+    } else {
+        PathBuf::from(path)
+    };
+
+    if expanded.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!("Path traversal is not allowed: {}", path));
+    }
+
+    if expanded.is_absolute() {
+        let canonical = expanded.canonicalize().unwrap_or_else(|_| expanded.clone());
+        let home_path = PathBuf::from(&home);
+        if !canonical.starts_with(&home_path) {
+            return Err(format!("Path escapes HOME: {}", path));
+        }
+        return Ok(canonical);
+    }
+
+    Ok(expanded)
 }
 
-/// Parses a CIDR string (e.g., "192.168.1.0/24") into a pre-computed CidrMatcher
-pub fn parse_cidr(cidr: &str) -> Option<CidrMatcher> {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let ip = Ipv4Addr::from_str(parts[0]).ok()?;
-    let prefix: u32 = parts[1].parse().ok()?;
-    if prefix > 32 {
-        return None;
+/// Parses a CIDR string (e.g., "192.168.1.0/24") into a pre-computed CidrMatcher.
+/// Invalid IPv4 values and reserved class D/E ranges are rejected with an error.
+pub fn parse_cidr(cidr: &str) -> Result<CidrMatcher, String> {
+    let (ip_str, prefix_str) = cidr.split_once('/').ok_or_else(|| format!("Invalid CIDR: {}", cidr))?;
+    if ip_str.is_empty() || prefix_str.is_empty() {
+        return Err(format!("Invalid CIDR: {}", cidr));
     }
 
-    Some(CidrMatcher::new(u32::from(ip), prefix))
+    let ip = Ipv4Addr::from_str(ip_str)
+        .map_err(|_| format!("Invalid IPv4 address in CIDR: {}", cidr))?;
+    let prefix: u32 = prefix_str
+        .parse()
+        .map_err(|_| format!("Invalid prefix in CIDR: {}", cidr))?;
+    if prefix > 32 {
+        return Err(format!("CIDR prefix out of range: {}", cidr));
+    }
+
+    let first_octet = ip.octets()[0];
+    if first_octet == 0 {
+        return Err(format!("CIDR range {} is reserved: 0.0.0.0/8 is not allowed", cidr));
+    }
+    if matches!(first_octet, 224..=239) || matches!(first_octet, 240..=255) {
+        return Err(format!("CIDR range {} is reserved: class D/E are not allowed", cidr));
+    }
+
+    Ok(CidrMatcher::new(u32::from(ip), prefix))
 }
 
 /// Fast-path check using short-circuit evaluation to filter excluded source IP networks
@@ -168,5 +204,34 @@ mod tests {
 
         let allowed_packet = make_ipv4_packet([192, 168, 110, 10], [10, 0, 0, 5], 12345, 443, 6);
         assert!(process_ip_payload(&allowed_packet, &[443], &[CidrMatcher::new(u32::from(omitted_net), 24)]).is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_cidr_prefixes() {
+        assert!(parse_cidr("192.168.1.1").is_err());
+        assert!(parse_cidr("192.168.1.1/").is_err());
+        assert!(parse_cidr("192.168.1.1/33").is_err());
+        assert!(parse_cidr("192.168.299.0/24").is_err());
+    }
+
+    #[test]
+    fn rejects_reserved_class_ranges() {
+        assert!(parse_cidr("0.0.0.0/8").is_err());
+        assert!(parse_cidr("224.0.0.0/24").is_err());
+        assert!(parse_cidr("239.255.255.0/24").is_err());
+        assert!(parse_cidr("240.0.0.0/24").is_err());
+        assert!(parse_cidr("255.255.255.255/32").is_err());
+    }
+
+    #[test]
+    fn allows_loopback_and_link_local_ranges() {
+        assert!(parse_cidr("127.0.0.0/8").is_ok());
+        assert!(parse_cidr("169.254.0.0/16").is_ok());
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        let result = expand_path("~/../../etc/passwd");
+        assert!(result.is_err());
     }
 }
