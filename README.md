@@ -9,6 +9,10 @@ Terminal-based IPv4 traffic visualizer in Rust using Unicode Braille characters.
 - Real-time packet capture display on a 224x256 IPv4 grid (Excludes Class D/E multicast & reserved space)
 - Support for pcap files and live interfaces
 - Regional Internet Registry (RIR) traffic statistics
+- `/16` detail view for inspecting traffic in a focused 4x4 block
+- Live packet counters and activity updates in both the main and detail views
+- Input validation for zoom targets and omitted IPv4 CIDR networks
+- Reserved Class D/E and `0.0.0.0/8` networks are rejected for omitted ranges
 
 ## Requirements
 
@@ -67,6 +71,18 @@ sudo cargo run --release -- -i en0
 cargo run --release -- -r sample.pcap
 ```
 
+### Detail View
+
+Press `z` or `Z` in the main view to open the `/16` input screen. Enter the first
+two IPv4 octets, for example `10.123` or `10.123/16`, and press `Enter`.
+The detail view shows the selected `/16` area as a 4x4 grid of neighboring
+`/16` networks with their recent packet activity counts. The overlay is centered
+in the terminal and updates while capture continues.
+
+Invalid IPv4 values, unsupported CIDR prefixes, and reserved Class D/E or
+`0.0.0.0/8` ranges are rejected with an error. Loopback (`127.0.0.0/8`) and
+link-local (`169.254.0.0/16`) ranges remain available for inspection.
+
 ## How to Read the Grid
 
 - Vertical Axis (Y): First IPv4 Octet (0 – 223)
@@ -83,6 +99,9 @@ cargo run --release -- -r sample.pcap
 | --- | --- |
 | `Space` | Pause / Resume visualization |
 | `r` | Clear screen & reset packet counters |
+| `z` / `Z` | Open the `/16` detail view |
+| `Enter` | Open the detail view for the entered address |
+| `Esc` | Cancel input or return from the detail view |
 | `q` | Quit application |
 
 ## Technical Note: Braille Grid & Color Representation
@@ -95,6 +114,10 @@ To balance spatial density with attribute visualization:
 - **Color (Intensity):** The color of the character cell represents a **relative activity score** for that 2x4 cell, based on how many packet hits occurred in the current hold window. It is intentionally **not an exact per-/24 PPS measurement** for any individual dot or subnet.
 
 In other words, a red cell means the cell was significantly more active than a cyan cell in the current viewing window, but it does not mean the underlying /24 is generating a precise PPS value. For exact traffic rate information, use the global PPS counter in the status line.
+
+The detail view uses the same recent activity window and displays approximate
+per-network counts. The global PPS and RIR summary are updated in batches to
+keep CPU usage low during high-volume captures.
 
 ## License
 
