@@ -128,8 +128,10 @@ fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
 fn detail_activity_cells(
     focus: (u8, u8),
     activity_by_network: &HashMap<(u8, u8), Vec<Instant>>,
+    hold_seconds: f64,
 ) -> Vec<((u8, u8), usize)> {
     let mut cells = Vec::with_capacity(16);
+    let rate_factor = 1.0 / hold_seconds.max(0.01);
 
     let base_oct1 = focus.0;
     let base_oct2 = focus.1;
@@ -139,7 +141,7 @@ fn detail_activity_cells(
             let oct2 = base_oct2 + col as u8;
             let count = activity_by_network
                 .get(&(oct1, oct2))
-                .map(|timestamps| timestamps.len())
+                .map(|timestamps| (timestamps.len() as f64 * rate_factor).round() as usize)
                 .unwrap_or(0);
             cells.push(((oct1, oct2), count));
         }
@@ -186,24 +188,24 @@ mod tests {
             ((195, 171), vec![Instant::now(); 14]),
         ]);
 
-        let cells = detail_activity_cells((192, 168), &activity);
+        let cells = detail_activity_cells((192, 168), &activity, 0.5);
         assert_eq!(cells.len(), 16);
-        assert_eq!(cells[0].1, 12);
-        assert_eq!(cells[1].1, 7);
-        assert_eq!(cells[2].1, 4);
-        assert_eq!(cells[3].1, 1);
+        assert_eq!(cells[0].1, 24);
+        assert_eq!(cells[1].1, 14);
+        assert_eq!(cells[2].1, 8);
+        assert_eq!(cells[3].1, 2);
         assert_eq!(cells[4].1, 0);
         assert_eq!(cells[5].1, 0);
-        assert_eq!(cells[6].1, 9);
-        assert_eq!(cells[7].1, 2);
-        assert_eq!(cells[8].1, 3);
-        assert_eq!(cells[9].1, 5);
-        assert_eq!(cells[10].1, 8);
-        assert_eq!(cells[11].1, 6);
-        assert_eq!(cells[12].1, 11);
-        assert_eq!(cells[13].1, 10);
-        assert_eq!(cells[14].1, 13);
-        assert_eq!(cells[15].1, 14);
+        assert_eq!(cells[6].1, 18);
+        assert_eq!(cells[7].1, 4);
+        assert_eq!(cells[8].1, 6);
+        assert_eq!(cells[9].1, 10);
+        assert_eq!(cells[10].1, 16);
+        assert_eq!(cells[11].1, 12);
+        assert_eq!(cells[12].1, 22);
+        assert_eq!(cells[13].1, 20);
+        assert_eq!(cells[14].1, 26);
+        assert_eq!(cells[15].1, 28);
     }
 }
 
@@ -758,7 +760,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
-                    let detail_activity = detail_activity_cells(*focus, &network_activity);
+                    let detail_activity =
+                        detail_activity_cells(*focus, &network_activity, hold_seconds);
                     let mut detail_lines = Vec::new();
 
                     for row_idx in 0..4 {

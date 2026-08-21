@@ -76,7 +76,7 @@ cargo run --release -- -r sample.pcap
 Press `z` or `Z` in the main view to open the `/16` input screen. Enter the first
 two IPv4 octets, for example `10.123` or `10.123/16`, and press `Enter`.
 The detail view shows the selected `/16` area as a 4x4 grid of neighboring
-`/16` networks with their recent packet activity counts. The overlay is centered
+`/16` networks with approximate per-network PPS values. The overlay is centered
 in the terminal and updates while capture continues.
 
 Invalid IPv4 values, unsupported CIDR prefixes, and reserved Class D/E or
@@ -116,8 +116,8 @@ To balance spatial density with attribute visualization:
 In other words, a red cell means the cell was significantly more active than a cyan cell in the current viewing window, but it does not mean the underlying /24 is generating a precise PPS value. For exact traffic rate information, use the global PPS counter in the status line.
 
 The detail view uses the same recent activity window and displays approximate
-per-network counts. The global PPS and RIR summary are updated in batches to
-keep CPU usage low during high-volume captures.
+per-network PPS values derived from that window. The global PPS and RIR summary
+are updated in batches to keep CPU usage low during high-volume captures.
 
 ## License
 
