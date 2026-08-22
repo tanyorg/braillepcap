@@ -546,6 +546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut detail_network_pps: HashMap<(u8, u8), usize> = HashMap::new();
     let mut detail_pps_accumulator: HashMap<(u8, u8), usize> = HashMap::new();
     let mut detail_pps_window_start = Instant::now();
+    let mut detail_has_complete_pps_window = false;
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
     let mut rir_delta: HashMap<&'static str, usize> = HashMap::new();
 
@@ -579,6 +580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             detail_network_pps.clear();
                             detail_pps_accumulator.clear();
                             detail_pps_window_start = Instant::now();
+                            detail_has_complete_pps_window = false;
                             app_mode = AppMode::ZoomInput {
                                 value: String::new(),
                                 error: None,
@@ -719,7 +721,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
                 while let Ok(update) = rx.try_recv() {
                     if update.pps_stat.is_some() {
-                        detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        if detail_has_complete_pps_window {
+                            detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        } else {
+                            detail_pps_accumulator.clear();
+                            detail_has_complete_pps_window = true;
+                        }
                         detail_pps_window_start = now;
                     }
                     for (oct1, oct2, _oct3) in update.dots {

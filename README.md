@@ -115,11 +115,13 @@ To balance spatial density with attribute visualization:
 
 In other words, a red cell means the cell was significantly more active than a cyan cell in the current viewing window, but it does not mean the underlying /24 is generating a precise PPS value. For exact traffic rate information, use the global PPS counter in the status line.
 
-The detail view uses the same recent activity window and displays approximate
-per-network PPS values derived from that window. The global PPS and RIR summary
-are updated in batches to keep CPU usage low during high-volume captures. Recent
-activity is maintained in fixed 100ms counter buckets instead of per-packet
-timestamps, reducing memory use and avoiding large periodic cleanup operations.
+The detail view displays per-network PPS values from an independent one-second
+accumulator. During PCAP replay, the first second boundary after opening the
+detail view is discarded so that the first displayed value always represents a
+complete second. The global PPS and RIR summary are updated in batches to keep
+CPU usage low during high-volume captures. Recent activity is maintained in
+fixed 100ms counter buckets instead of per-packet timestamps, reducing memory
+use and avoiding large periodic cleanup operations.
 
 ## License
 
