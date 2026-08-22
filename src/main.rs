@@ -158,6 +158,7 @@ fn detail_activity_cells(
 
 const ACTIVITY_BUCKET_WIDTH: Duration = Duration::from_millis(100);
 
+#[derive(Clone)]
 struct ActivityBucket {
     dots: HashMap<(u8, u8), usize>,
     cells: HashMap<(usize, usize), usize>,
@@ -180,6 +181,7 @@ impl ActivityBucket {
     }
 }
 
+#[derive(Clone)]
 struct ActivityBuckets {
     buckets: Vec<ActivityBucket>,
     current_index: usize,
@@ -371,8 +373,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Live capture requires root privileges. Run with sudo or as root.".into());
     }
 
-    validate_interface_name(&iface)?;
-
     let omit_nets: Vec<CidrMatcher> = args
         .omit
         .iter()
@@ -394,6 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cap = Capture::from_file(path)?;
         CapEngine::File(cap)
     } else {
+        validate_interface_name(&iface)?;
         let cap = Capture::from_device(iface.as_str())
             .map_err(|e| format!("Device error '{}': {}", iface, e))?
             .promisc(false)
@@ -544,6 +545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1.0
     };
     let mut activity = ActivityBuckets::new(Instant::now(), hold_duration);
+    let mut detail_activity = activity.clone();
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
     let mut rir_delta: HashMap<&'static str, usize> = HashMap::new();
 
@@ -574,6 +576,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('q') => break,
                         KeyCode::Char(' ') => is_paused = !is_paused,
                         KeyCode::Char('z') | KeyCode::Char('Z') => {
+                            detail_activity = activity.clone();
                             app_mode = AppMode::ZoomInput {
                                 value: String::new(),
                                 error: None,
@@ -712,10 +715,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
-                activity.advance(now);
+                detail_activity.advance(now);
                 while let Ok(update) = rx.try_recv() {
                     for (oct1, oct2, _oct3) in update.dots {
-                        activity.record(oct1, oct2, now);
+                        detail_activity.record(oct1, oct2, now);
                     }
                 }
             }
@@ -860,7 +863,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
-                    let detail_activity = detail_activity_cells(*focus, &activity.networks)
+                    let detail_activity = detail_activity_cells(*focus, &detail_activity.networks)
                         .into_iter()
                         .map(|(network, count)| {
                             let pps = (count as f64 / hold_seconds.max(0.01)).round() as usize;
