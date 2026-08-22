@@ -158,7 +158,6 @@ fn detail_activity_cells(
 
 const ACTIVITY_BUCKET_WIDTH: Duration = Duration::from_millis(100);
 
-#[derive(Clone)]
 struct ActivityBucket {
     dots: HashMap<(u8, u8), usize>,
     cells: HashMap<(usize, usize), usize>,
@@ -181,7 +180,6 @@ impl ActivityBucket {
     }
 }
 
-#[derive(Clone)]
 struct ActivityBuckets {
     buckets: Vec<ActivityBucket>,
     current_index: usize,
@@ -545,7 +543,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1.0
     };
     let mut activity = ActivityBuckets::new(Instant::now(), hold_duration);
-    let mut detail_activity = activity.clone();
+    let mut detail_network_pps: HashMap<(u8, u8), usize> = HashMap::new();
+    let mut detail_pps_accumulator: HashMap<(u8, u8), usize> = HashMap::new();
+    let mut detail_pps_window_start = Instant::now();
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
     let mut rir_delta: HashMap<&'static str, usize> = HashMap::new();
 
@@ -576,7 +576,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('q') => break,
                         KeyCode::Char(' ') => is_paused = !is_paused,
                         KeyCode::Char('z') | KeyCode::Char('Z') => {
-                            detail_activity = activity.clone();
+                            detail_network_pps.clear();
+                            detail_pps_accumulator.clear();
+                            detail_pps_window_start = Instant::now();
                             app_mode = AppMode::ZoomInput {
                                 value: String::new(),
                                 error: None,
@@ -715,10 +717,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
-                detail_activity.advance(now);
                 while let Ok(update) = rx.try_recv() {
+                    if update.pps_stat.is_some() {
+                        detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        detail_pps_window_start = now;
+                    }
                     for (oct1, oct2, _oct3) in update.dots {
-                        detail_activity.record(oct1, oct2, now);
+                        *detail_pps_accumulator.entry((oct1, oct2)).or_insert(0) += 1;
+                    }
+                    if update.pps_stat.is_none()
+                        && now.duration_since(detail_pps_window_start) >= Duration::from_secs(1)
+                    {
+                        detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        detail_pps_window_start = now;
                     }
                 }
             }
@@ -863,13 +874,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
-                    let detail_activity = detail_activity_cells(*focus, &detail_activity.networks)
-                        .into_iter()
-                        .map(|(network, count)| {
-                            let pps = (count as f64 / hold_seconds.max(0.01)).round() as usize;
-                            (network, pps)
-                        })
-                        .collect::<Vec<_>>();
+                    let detail_activity = detail_activity_cells(*focus, &detail_network_pps);
                     let mut detail_lines = Vec::new();
 
                     for row_idx in 0..4 {
