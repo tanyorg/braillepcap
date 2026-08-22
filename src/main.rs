@@ -43,8 +43,7 @@ fn has_root_privileges() -> bool {
             .arg("-u")
             .output()
             .map(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).trim() == "0"
+                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0"
             })
             .unwrap_or(false)
     }
@@ -60,15 +59,22 @@ fn validate_interface_name(iface: &str) -> Result<(), String> {
         return Err("Interface name cannot be empty".to_string());
     }
 
-    if iface.chars().any(|c| c.is_whitespace() || c == '/' || c == '\\') {
+    if iface
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == '\\')
+    {
         return Err(format!("Invalid interface name: '{}'", iface));
     }
 
     #[cfg(target_os = "linux")]
     {
         let net_dir = std::path::Path::new("/sys/class/net");
-        let entries = std::fs::read_dir(net_dir)
-            .map_err(|_| format!("Unable to inspect system interfaces for '{}': /sys/class/net is not accessible", iface))?;
+        let entries = std::fs::read_dir(net_dir).map_err(|_| {
+            format!(
+                "Unable to inspect system interfaces for '{}': /sys/class/net is not accessible",
+                iface
+            )
+        })?;
 
         let valid = entries
             .filter_map(|entry| entry.ok())
@@ -88,8 +94,13 @@ fn validate_interface_name(iface: &str) -> Result<(), String> {
 #[derive(Clone, Debug)]
 enum AppMode {
     Main,
-    ZoomInput { value: String, error: Option<String> },
-    Detail { focus: (u8, u8) },
+    ZoomInput {
+        value: String,
+        error: Option<String>,
+    },
+    Detail {
+        focus: (u8, u8),
+    },
 }
 
 fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
@@ -127,11 +138,9 @@ fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
 
 fn detail_activity_cells(
     focus: (u8, u8),
-    activity_by_network: &HashMap<(u8, u8), Vec<Instant>>,
-    hold_seconds: f64,
+    activity_by_network: &HashMap<(u8, u8), usize>,
 ) -> Vec<((u8, u8), usize)> {
     let mut cells = Vec::with_capacity(16);
-    let rate_factor = 1.0 / hold_seconds.max(0.01);
 
     let base_oct1 = focus.0;
     let base_oct2 = focus.1;
@@ -139,10 +148,7 @@ fn detail_activity_cells(
         for col in 0..4 {
             let oct1 = base_oct1 + row as u8;
             let oct2 = base_oct2 + col as u8;
-            let count = activity_by_network
-                .get(&(oct1, oct2))
-                .map(|timestamps| (timestamps.len() as f64 * rate_factor).round() as usize)
-                .unwrap_or(0);
+            let count = activity_by_network.get(&(oct1, oct2)).copied().unwrap_or(0);
             cells.push(((oct1, oct2), count));
         }
     }
@@ -150,11 +156,126 @@ fn detail_activity_cells(
     cells
 }
 
+const ACTIVITY_BUCKET_WIDTH: Duration = Duration::from_millis(100);
+
+struct ActivityBucket {
+    dots: HashMap<(u8, u8), usize>,
+    cells: HashMap<(usize, usize), usize>,
+    networks: HashMap<(u8, u8), usize>,
+}
+
+impl ActivityBucket {
+    fn new() -> Self {
+        Self {
+            dots: HashMap::new(),
+            cells: HashMap::new(),
+            networks: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.dots.clear();
+        self.cells.clear();
+        self.networks.clear();
+    }
+}
+
+struct ActivityBuckets {
+    buckets: Vec<ActivityBucket>,
+    current_index: usize,
+    current_start: Instant,
+    dots: HashMap<(u8, u8), usize>,
+    cells: HashMap<(usize, usize), usize>,
+    networks: HashMap<(u8, u8), usize>,
+}
+
+impl ActivityBuckets {
+    fn new(now: Instant, hold_duration: Duration) -> Self {
+        let bucket_count = (hold_duration.as_millis() + ACTIVITY_BUCKET_WIDTH.as_millis() - 1)
+            .checked_div(ACTIVITY_BUCKET_WIDTH.as_millis())
+            .unwrap_or(1)
+            .max(1) as usize;
+
+        Self {
+            buckets: (0..bucket_count).map(|_| ActivityBucket::new()).collect(),
+            current_index: 0,
+            current_start: now,
+            dots: HashMap::new(),
+            cells: HashMap::new(),
+            networks: HashMap::new(),
+        }
+    }
+
+    fn advance(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.current_start);
+        let steps = elapsed.as_millis() / ACTIVITY_BUCKET_WIDTH.as_millis();
+        if steps == 0 {
+            return;
+        }
+
+        if steps >= self.buckets.len() as u128 {
+            for bucket in &mut self.buckets {
+                bucket.clear();
+            }
+            self.dots.clear();
+            self.cells.clear();
+            self.networks.clear();
+            self.current_index = 0;
+            self.current_start = now;
+            return;
+        }
+
+        for _ in 0..steps {
+            self.current_index = (self.current_index + 1) % self.buckets.len();
+            let expired = &mut self.buckets[self.current_index];
+            for (key, count) in expired.dots.drain() {
+                Self::subtract(&mut self.dots, key, count);
+            }
+            for (key, count) in expired.cells.drain() {
+                Self::subtract(&mut self.cells, key, count);
+            }
+            for (key, count) in expired.networks.drain() {
+                Self::subtract(&mut self.networks, key, count);
+            }
+            self.current_start += ACTIVITY_BUCKET_WIDTH;
+        }
+    }
+
+    fn record(&mut self, oct1: u8, oct2: u8, now: Instant) {
+        self.advance(now);
+        let dot_key = (oct1, oct2);
+        let cell_key = ((oct2 / 2) as usize, (oct1 / 4) as usize);
+        let bucket = &mut self.buckets[self.current_index];
+        *bucket.dots.entry(dot_key).or_insert(0) += 1;
+        *bucket.cells.entry(cell_key).or_insert(0) += 1;
+        *bucket.networks.entry(dot_key).or_insert(0) += 1;
+        *self.dots.entry(dot_key).or_insert(0) += 1;
+        *self.cells.entry(cell_key).or_insert(0) += 1;
+        *self.networks.entry(dot_key).or_insert(0) += 1;
+    }
+
+    fn subtract<K: Eq + std::hash::Hash>(totals: &mut HashMap<K, usize>, key: K, count: usize) {
+        if let Some(total) = totals.get_mut(&key) {
+            *total = total.saturating_sub(count);
+            if *total == 0 {
+                totals.remove(&key);
+            }
+        }
+    }
+
+    fn reset(&mut self, now: Instant, hold_duration: Duration) {
+        *self = Self::new(now, hold_duration);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, time::Instant};
+    use std::{
+        collections::HashMap,
+        time::{Duration, Instant},
+    };
 
-    use super::{detail_activity_cells, parse_zoom_target};
+    use super::{detail_activity_cells, parse_zoom_target, ActivityBuckets};
 
     #[test]
     fn parse_zoom_target_accepts_first_two_octets_in_16_form() {
@@ -170,25 +291,25 @@ mod tests {
     #[test]
     fn detail_activity_cells_use_the_selected_braille_window() {
         let activity = HashMap::from([
-            ((192, 168), vec![Instant::now(); 12]),
-            ((192, 169), vec![Instant::now(); 7]),
-            ((192, 170), vec![Instant::now(); 4]),
-            ((192, 171), vec![Instant::now(); 1]),
-            ((193, 168), vec![Instant::now(); 0]),
-            ((193, 169), vec![]),
-            ((193, 170), vec![Instant::now(); 9]),
-            ((193, 171), vec![Instant::now(); 2]),
-            ((194, 168), vec![Instant::now(); 3]),
-            ((194, 169), vec![Instant::now(); 5]),
-            ((194, 170), vec![Instant::now(); 8]),
-            ((194, 171), vec![Instant::now(); 6]),
-            ((195, 168), vec![Instant::now(); 11]),
-            ((195, 169), vec![Instant::now(); 10]),
-            ((195, 170), vec![Instant::now(); 13]),
-            ((195, 171), vec![Instant::now(); 14]),
+            ((192, 168), 24),
+            ((192, 169), 14),
+            ((192, 170), 8),
+            ((192, 171), 2),
+            ((193, 168), 0),
+            ((193, 169), 0),
+            ((193, 170), 18),
+            ((193, 171), 4),
+            ((194, 168), 6),
+            ((194, 169), 10),
+            ((194, 170), 16),
+            ((194, 171), 12),
+            ((195, 168), 22),
+            ((195, 169), 20),
+            ((195, 170), 26),
+            ((195, 171), 28),
         ]);
 
-        let cells = detail_activity_cells((192, 168), &activity, 0.5);
+        let cells = detail_activity_cells((192, 168), &activity);
         assert_eq!(cells.len(), 16);
         assert_eq!(cells[0].1, 24);
         assert_eq!(cells[1].1, 14);
@@ -207,12 +328,25 @@ mod tests {
         assert_eq!(cells[14].1, 26);
         assert_eq!(cells[15].1, 28);
     }
+
+    #[test]
+    fn activity_buckets_expire_data_by_bucket_width() {
+        let start = Instant::now();
+        let mut activity = ActivityBuckets::new(start, Duration::from_millis(300));
+        activity.record(10, 123, start);
+        assert_eq!(activity.networks.get(&(10, 123)), Some(&1));
+
+        activity.advance(start + Duration::from_millis(299));
+        assert_eq!(activity.networks.get(&(10, 123)), Some(&1));
+
+        activity.advance(start + Duration::from_millis(300));
+        assert!(!activity.networks.contains_key(&(10, 123)));
+    }
 }
 
 fn reset_screen_state(
-    active_dots: &mut HashMap<(u8, u8), Instant>,
-    cell_history: &mut HashMap<(usize, usize), Vec<Instant>>,
-    network_activity: &mut HashMap<(u8, u8), Vec<Instant>>,
+    activity: &mut ActivityBuckets,
+    hold_duration: Duration,
     rir_counter: &mut HashMap<&'static str, usize>,
     rir_delta: &mut HashMap<&'static str, usize>,
     packet_count: &mut usize,
@@ -220,9 +354,7 @@ fn reset_screen_state(
     pps_window_start: &mut Instant,
     last_stats_calc: &mut Instant,
 ) {
-    active_dots.clear();
-    cell_history.clear();
-    network_activity.clear();
+    activity.reset(Instant::now(), hold_duration);
     rir_counter.clear();
     rir_delta.clear();
     *packet_count = 0;
@@ -307,7 +439,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     if replay_speed > 0.0 {
-                        let pkt_ts = Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
+                        let pkt_ts =
+                            Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
                         if start_pcap_ts.is_none() {
                             start_pcap_ts = Some(pkt_ts);
                         }
@@ -410,9 +543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         1.0
     };
-    let mut active_dots: HashMap<(u8, u8), Instant> = HashMap::new();
-    let mut cell_history: HashMap<(usize, usize), Vec<Instant>> = HashMap::new();
-    let mut network_activity: HashMap<(u8, u8), Vec<Instant>> = HashMap::new();
+    let mut activity = ActivityBuckets::new(Instant::now(), hold_duration);
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
     let mut rir_delta: HashMap<&'static str, usize> = HashMap::new();
 
@@ -422,7 +553,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pps_accumulator = 0usize;
     let mut last_stats_calc = Instant::now();
     let mut last_rir_flush = Instant::now();
-    let mut last_retain = Instant::now();
     let mut is_paused = false;
     let mut current_time_str = String::from("-------------------");
     let mut app_mode = AppMode::Main;
@@ -451,9 +581,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             reset_screen_state(
-                                &mut active_dots,
-                                &mut cell_history,
-                                &mut network_activity,
+                                &mut activity,
+                                hold_duration,
                                 &mut rir_counter,
                                 &mut rir_delta,
                                 &mut packet_count,
@@ -469,9 +598,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Esc => {
                             app_mode = AppMode::Main;
                             reset_screen_state(
-                                &mut active_dots,
-                                &mut cell_history,
-                                &mut network_activity,
+                                &mut activity,
+                                hold_duration,
                                 &mut rir_counter,
                                 &mut rir_delta,
                                 &mut packet_count,
@@ -481,25 +609,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             terminal.clear()?;
                         }
-                        KeyCode::Enter => {
-                            match parse_zoom_target(value) {
-                                Ok((oct1, oct2)) => {
-                                    app_mode = AppMode::Detail {
-                                        focus: (oct1, oct2),
-                                    };
-                                }
-                                Err(msg) => {
-                                    *error = Some(msg);
-                                }
+                        KeyCode::Enter => match parse_zoom_target(value) {
+                            Ok((oct1, oct2)) => {
+                                app_mode = AppMode::Detail {
+                                    focus: (oct1, oct2),
+                                };
                             }
-                        }
+                            Err(msg) => {
+                                *error = Some(msg);
+                            }
+                        },
                         KeyCode::Backspace | KeyCode::Delete => {
                             value.pop();
                             *error = None;
                         }
-                        KeyCode::Char(c)
-                            if c == '\u{7}' || c == '\u{8}' || c == '\u{127}' =>
-                        {
+                        KeyCode::Char(c) if c == '\u{7}' || c == '\u{8}' || c == '\u{127}' => {
                             value.pop();
                             *error = None;
                         }
@@ -514,9 +638,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Esc => {
                             app_mode = AppMode::Main;
                             reset_screen_state(
-                                &mut active_dots,
-                                &mut cell_history,
-                                &mut network_activity,
+                                &mut activity,
+                                hold_duration,
                                 &mut rir_counter,
                                 &mut rir_delta,
                                 &mut packet_count,
@@ -536,6 +659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match app_mode {
             AppMode::Main => {
+                activity.advance(now);
                 if is_paused {
                     while rx.try_recv().is_ok() {}
                 } else {
@@ -563,15 +687,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         for (oct1, oct2, _oct3) in update.dots {
-                            active_dots.insert((oct1, oct2), now);
-                            network_activity.entry((oct1, oct2)).or_default().push(now);
+                            activity.record(oct1, oct2, now);
 
                             let rir = get_iana_rir(oct1);
                             *rir_delta.entry(rir).or_insert(0) += 1;
-
-                            let char_y = (oct1 / 4) as usize;
-                            let char_x = (oct2 / 2) as usize;
-                            cell_history.entry((char_x, char_y)).or_default().push(now);
                         }
                     }
 
@@ -590,32 +709,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             last_stats_calc = now;
                         }
                     }
-
-                    if now.duration_since(last_retain) >= Duration::from_millis(500) {
-                        active_dots.retain(|_, time| now.duration_since(*time) < hold_duration);
-                        cell_history.retain(|_, timestamps| {
-                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
-                            !timestamps.is_empty()
-                        });
-                        network_activity.retain(|_, timestamps| {
-                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
-                            !timestamps.is_empty()
-                        });
-                        last_retain = now;
-                    }
                 }
             }
             AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
+                activity.advance(now);
                 while let Ok(update) = rx.try_recv() {
                     for (oct1, oct2, _oct3) in update.dots {
-                        network_activity.entry((oct1, oct2)).or_default().push(now);
-                    }
-                    if now.duration_since(last_retain) >= Duration::from_millis(500) {
-                        network_activity.retain(|_, timestamps| {
-                            timestamps.retain(|t| now.duration_since(*t) < hold_duration);
-                            !timestamps.is_empty()
-                        });
-                        last_retain = now;
+                        activity.record(oct1, oct2, now);
                     }
                 }
             }
@@ -681,7 +781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut cell_masks: HashMap<(usize, usize), u16> = HashMap::new();
-            for &(oct1, oct2) in active_dots.keys() {
+            for &(oct1, oct2) in activity.dots.keys() {
                 let cy = (oct1 / 4) as usize;
                 let cx = (oct2 / 2) as usize;
                 let sub_y = (oct1 % 4) as usize;
@@ -696,7 +796,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let scr_y = (cy + 3) as u16;
 
                 let braille_char = std::char::from_u32(0x2800 + mask as u32).unwrap_or(' ');
-                let cell_activity = cell_history.get(&(cx, cy)).map_or(0, |v| v.len());
+                let cell_activity = activity.cells.get(&(cx, cy)).copied().unwrap_or(0);
                 let style = get_color_and_style(cell_activity);
 
                 buf.set_string(scr_x, scr_y, braille_char.to_string(), style);
@@ -760,8 +860,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
-                    let detail_activity =
-                        detail_activity_cells(*focus, &network_activity, hold_seconds);
+                    let detail_activity = detail_activity_cells(*focus, &activity.networks)
+                        .into_iter()
+                        .map(|(network, count)| {
+                            let pps = (count as f64 / hold_seconds.max(0.01)).round() as usize;
+                            (network, pps)
+                        })
+                        .collect::<Vec<_>>();
                     let mut detail_lines = Vec::new();
 
                     for row_idx in 0..4 {

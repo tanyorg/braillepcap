@@ -117,7 +117,9 @@ In other words, a red cell means the cell was significantly more active than a c
 
 The detail view uses the same recent activity window and displays approximate
 per-network PPS values derived from that window. The global PPS and RIR summary
-are updated in batches to keep CPU usage low during high-volume captures.
+are updated in batches to keep CPU usage low during high-volume captures. Recent
+activity is maintained in fixed 100ms counter buckets instead of per-packet
+timestamps, reducing memory use and avoiding large periodic cleanup operations.
 
 ## License
 

@@ -48,7 +48,10 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
         PathBuf::from(path)
     };
 
-    if expanded.components().any(|c| matches!(c, Component::ParentDir)) {
+    if expanded
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
         return Err(format!("Path traversal is not allowed: {}", path));
     }
 
@@ -67,7 +70,9 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
 /// Parses a CIDR string (e.g., "192.168.1.0/24") into a pre-computed CidrMatcher.
 /// Invalid IPv4 values and reserved class D/E ranges are rejected with an error.
 pub fn parse_cidr(cidr: &str) -> Result<CidrMatcher, String> {
-    let (ip_str, prefix_str) = cidr.split_once('/').ok_or_else(|| format!("Invalid CIDR: {}", cidr))?;
+    let (ip_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("Invalid CIDR: {}", cidr))?;
     if ip_str.is_empty() || prefix_str.is_empty() {
         return Err(format!("Invalid CIDR: {}", cidr));
     }
@@ -83,10 +88,16 @@ pub fn parse_cidr(cidr: &str) -> Result<CidrMatcher, String> {
 
     let first_octet = ip.octets()[0];
     if first_octet == 0 {
-        return Err(format!("CIDR range {} is reserved: 0.0.0.0/8 is not allowed", cidr));
+        return Err(format!(
+            "CIDR range {} is reserved: 0.0.0.0/8 is not allowed",
+            cidr
+        ));
     }
     if matches!(first_octet, 224..=239) || matches!(first_octet, 240..=255) {
-        return Err(format!("CIDR range {} is reserved: class D/E are not allowed", cidr));
+        return Err(format!(
+            "CIDR range {} is reserved: class D/E are not allowed",
+            cidr
+        ));
     }
 
     Ok(CidrMatcher::new(u32::from(ip), prefix))
@@ -164,7 +175,13 @@ pub fn process_ip_payload(
 mod tests {
     use super::*;
 
-    fn make_ipv4_packet(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, proto: u8) -> Vec<u8> {
+    fn make_ipv4_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        proto: u8,
+    ) -> Vec<u8> {
         let mut pkt = vec![0u8; 40];
         pkt[0] = 0x45; // Version 4, IHL 5
         pkt[8] = 0x00;
@@ -181,7 +198,8 @@ mod tests {
         let packet_to_target = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 54321, 443, 6);
         assert!(process_ip_payload(&packet_to_target, &[443], &[]).is_some());
 
-        let response_from_target = make_ipv4_packet([10, 0, 0, 5], [192, 168, 1, 10], 443, 54321, 6);
+        let response_from_target =
+            make_ipv4_packet([10, 0, 0, 5], [192, 168, 1, 10], 443, 54321, 6);
         assert!(process_ip_payload(&response_from_target, &[443], &[]).is_none());
     }
 
@@ -201,10 +219,20 @@ mod tests {
     fn omit_filter_uses_source_ip_only() {
         let omitted_net = Ipv4Addr::new(192, 168, 111, 0);
         let packet = make_ipv4_packet([192, 168, 111, 10], [10, 0, 0, 5], 12345, 443, 6);
-        assert!(process_ip_payload(&packet, &[443], &[CidrMatcher::new(u32::from(omitted_net), 24)]).is_none());
+        assert!(process_ip_payload(
+            &packet,
+            &[443],
+            &[CidrMatcher::new(u32::from(omitted_net), 24)]
+        )
+        .is_none());
 
         let allowed_packet = make_ipv4_packet([192, 168, 110, 10], [10, 0, 0, 5], 12345, 443, 6);
-        assert!(process_ip_payload(&allowed_packet, &[443], &[CidrMatcher::new(u32::from(omitted_net), 24)]).is_some());
+        assert!(process_ip_payload(
+            &allowed_packet,
+            &[443],
+            &[CidrMatcher::new(u32::from(omitted_net), 24)]
+        )
+        .is_some());
     }
 
     #[test]

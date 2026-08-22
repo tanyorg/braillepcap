@@ -32,7 +32,9 @@ mod tests {
         assert_eq!(get_color_and_style(6), Style::default().fg(Color::Green));
         assert_eq!(
             get_color_and_style(21),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         );
         assert_eq!(
             get_color_and_style(101),
