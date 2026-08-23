@@ -287,7 +287,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             value.push(c);
                             *error = None;
                         }
-                        KeyCode::Char('q') => break,
                         _ => {}
                     },
                     AppMode::Detail { .. } => match key.code {
@@ -306,7 +305,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             terminal.clear()?;
                             terminal.flush()?;
                         }
-                        KeyCode::Char('q') => break,
                         _ => {}
                     },
                 }
@@ -428,7 +426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut top_border = "    +".to_string() + &"-".repeat(128) + "+";
             let mut top_chars: Vec<char> = top_border.chars().collect();
-            for pos in [21, 37, 53, 69, 85, 101, 117] {
+            for pos in [13, 21, 29, 37, 45, 53, 61, 69, 77, 85, 93, 101, 109, 117, 125] {
                 top_chars[pos] = '+';
             }
             top_border = top_chars.into_iter().collect();
