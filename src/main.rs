@@ -556,7 +556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })?;
 
-        thread::sleep(Duration::from_millis(33));
+        thread::sleep(Duration::from_millis(100));
     }
 
     // Restore terminal configuration on exit
