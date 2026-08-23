@@ -264,4 +264,12 @@ mod tests {
         let result = expand_path("/tmp/capture.pcap");
         assert_eq!(result, Ok(PathBuf::from("/tmp/capture.pcap")));
     }
+    #[test]
+    fn cidr_match_works() {
+        let net = parse_cidr("192.168.1.0/24").unwrap();
+
+        assert!(net.matches(u32::from(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(net.matches(u32::from(Ipv4Addr::new(192, 168, 1, 254))));
+        assert!(!net.matches(u32::from(Ipv4Addr::new(192, 168, 2, 1))));
+    }
 }
