@@ -4,10 +4,137 @@
 use super::os::calculate_l2_offset;
 use super::parser::{process_ip_payload, CidrMatcher};
 use pcap::{Capture, Linktype};
+use std::{
+    sync::mpsc::Sender,
+    thread,
+    time::{Duration, Instant},
+};
+
+use super::BatchUpdate;
 
 pub enum CapEngine {
     File(Capture<pcap::Offline>),
     Live(Capture<pcap::Active>),
+}
+
+pub fn spawn_capture_thread(
+    engine: CapEngine,
+    tx: Sender<BatchUpdate>,
+    ports: Vec<u16>,
+    replay_speed: f64,
+    omit_nets: Vec<CidrMatcher>,
+) {
+    thread::spawn(move || {
+        let mut batch = Vec::with_capacity(10000);
+        let mut last_flush = Instant::now();
+        let flush_interval = Duration::from_millis(16);
+
+        match engine {
+            CapEngine::File(mut cap) => {
+                let datalink = cap.get_datalink();
+                let mut start_pcap_ts: Option<Duration> = None;
+                let start_real_ts = Instant::now();
+                let mut current_pcap_sec = 0u64;
+                let mut pcap_sec_count = 0usize;
+
+                while let Ok(packet) = cap.next_packet() {
+                    let pkt_sec = packet.header.ts.tv_sec as u64;
+                    if current_pcap_sec == 0 {
+                        current_pcap_sec = pkt_sec;
+                    }
+
+                    let mut pps_to_send = None;
+                    if pkt_sec > current_pcap_sec {
+                        pps_to_send = Some(pcap_sec_count);
+                        pcap_sec_count = 0;
+                        current_pcap_sec = pkt_sec;
+                    }
+
+                    if replay_speed > 0.0 {
+                        let pkt_ts =
+                            Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
+                        if start_pcap_ts.is_none() {
+                            start_pcap_ts = Some(pkt_ts);
+                        }
+                        let pcap_elapsed = (pkt_ts - start_pcap_ts.unwrap()).div_f64(replay_speed);
+                        let real_elapsed = start_real_ts.elapsed();
+
+                        if pcap_elapsed > real_elapsed {
+                            thread::sleep(pcap_elapsed - real_elapsed);
+                        }
+                    }
+
+                    pcap_sec_count += 1;
+
+                    if let Some((oct1, oct2, oct3)) =
+                        parse_packet(packet.data, datalink, &ports, &omit_nets)
+                    {
+                        batch.push((oct1, oct2, oct3));
+                    }
+
+                    if batch.len() >= 10000
+                        || last_flush.elapsed() >= flush_interval
+                        || pps_to_send.is_some()
+                    {
+                        let count = batch.len();
+                        if tx
+                            .send(BatchUpdate {
+                                dots: std::mem::take(&mut batch),
+                                count,
+                                pps_stat: pps_to_send,
+                                last_pcap_sec: Some(current_pcap_sec as i64),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        last_flush = Instant::now();
+                    }
+                }
+                if !batch.is_empty() || pcap_sec_count > 0 {
+                    let count = batch.len();
+                    let _ = tx.send(BatchUpdate {
+                        dots: batch,
+                        count,
+                        pps_stat: Some(pcap_sec_count),
+                        last_pcap_sec: Some(current_pcap_sec as i64),
+                    });
+                }
+            }
+            CapEngine::Live(mut cap) => {
+                let datalink = cap.get_datalink();
+                loop {
+                    match cap.next_packet() {
+                        Ok(packet) => {
+                            if let Some((oct1, oct2, oct3)) =
+                                parse_packet(packet.data, datalink, &ports, &omit_nets)
+                            {
+                                batch.push((oct1, oct2, oct3));
+                            }
+                        }
+                        Err(pcap::Error::TimeoutExpired) => {}
+                        Err(_) => break,
+                    }
+
+                    if batch.len() >= 10000 || last_flush.elapsed() >= flush_interval {
+                        let count = batch.len();
+                        if tx
+                            .send(BatchUpdate {
+                                dots: std::mem::take(&mut batch),
+                                count,
+                                pps_stat: None,
+                                last_pcap_sec: None,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        last_flush = Instant::now();
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Strip L2 header and pass remaining payload to the packet parser

@@ -5,7 +5,7 @@ pub mod capture;
 pub mod os;
 pub mod parser;
 
-pub use capture::{parse_packet, CapEngine};
+pub use capture::{spawn_capture_thread, CapEngine};
 pub use parser::{expand_path, parse_cidr, CidrMatcher};
 
 pub struct BatchUpdate {
