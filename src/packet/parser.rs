@@ -56,12 +56,7 @@ pub fn expand_path(path: &str) -> Result<PathBuf, String> {
     }
 
     if expanded.is_absolute() {
-        let canonical = expanded.canonicalize().unwrap_or_else(|_| expanded.clone());
-        let home_path = PathBuf::from(&home);
-        if !canonical.starts_with(&home_path) {
-            return Err(format!("Path escapes HOME: {}", path));
-        }
-        return Ok(canonical);
+        return Ok(expanded.canonicalize().unwrap_or(expanded));
     }
 
     Ok(expanded)
@@ -262,5 +257,11 @@ mod tests {
     fn rejects_path_traversal() {
         let result = expand_path("~/../../etc/passwd");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn allows_absolute_paths_outside_home() {
+        let result = expand_path("/tmp/capture.pcap");
+        assert_eq!(result, Ok(PathBuf::from("/tmp/capture.pcap")));
     }
 }
