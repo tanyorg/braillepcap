@@ -5,7 +5,7 @@ use super::os::calculate_l2_offset;
 use super::parser::{process_ip_payload, CidrMatcher};
 use pcap::{Capture, Linktype};
 use std::{
-    sync::mpsc::Sender,
+    sync::mpsc::SyncSender,
     thread,
     time::{Duration, Instant},
 };
@@ -19,7 +19,7 @@ pub enum CapEngine {
 
 pub fn spawn_capture_thread(
     engine: CapEngine,
-    tx: Sender<BatchUpdate>,
+    tx: SyncSender<BatchUpdate>,
     ports: Vec<u16>,
     replay_speed: f64,
     omit_nets: Vec<CidrMatcher>,
@@ -38,7 +38,13 @@ pub fn spawn_capture_thread(
                 let mut pcap_sec_count = 0usize;
 
                 while let Ok(packet) = cap.next_packet() {
-                    let pkt_sec = packet.header.ts.tv_sec as u64;
+                    let Some(pkt_ts) = safe_packet_timestamp(
+                        packet.header.ts.tv_sec,
+                        i64::from(packet.header.ts.tv_usec),
+                    ) else {
+                        continue;
+                    };
+                    let pkt_sec = pkt_ts.as_secs();
                     if current_pcap_sec == 0 {
                         current_pcap_sec = pkt_sec;
                     }
@@ -51,12 +57,13 @@ pub fn spawn_capture_thread(
                     }
 
                     if replay_speed > 0.0 {
-                        let pkt_ts =
-                            Duration::new(pkt_sec, (packet.header.ts.tv_usec * 1000) as u32);
                         if start_pcap_ts.is_none() {
                             start_pcap_ts = Some(pkt_ts);
                         }
-                        let pcap_elapsed = (pkt_ts - start_pcap_ts.unwrap()).div_f64(replay_speed);
+                        let pcap_elapsed = pkt_ts
+                            .checked_sub(start_pcap_ts.unwrap())
+                            .unwrap_or(Duration::ZERO)
+                            .div_f64(replay_speed);
                         let real_elapsed = start_real_ts.elapsed();
 
                         if pcap_elapsed > real_elapsed {
@@ -137,6 +144,17 @@ pub fn spawn_capture_thread(
     });
 }
 
+fn safe_packet_timestamp(sec: i64, usec: i64) -> Option<Duration> {
+    if sec < 0 || !(0..1_000_000).contains(&usec) {
+        return None;
+    }
+
+    Some(Duration::new(
+        u64::try_from(sec).ok()?,
+        u32::try_from(usec).ok()?.checked_mul(1_000)?,
+    ))
+}
+
 /// Strip L2 header and pass remaining payload to the packet parser
 pub fn parse_packet(
     data: &[u8],
@@ -152,4 +170,25 @@ pub fn parse_packet(
 
     let ip_data = &data[l2_offset..];
     process_ip_payload(ip_data, target_ports, omit_nets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_packet_timestamp;
+    use std::time::Duration;
+
+    #[test]
+    fn rejects_invalid_packet_timestamps() {
+        assert_eq!(safe_packet_timestamp(-1, 0), None);
+        assert_eq!(safe_packet_timestamp(1, -1), None);
+        assert_eq!(safe_packet_timestamp(1, 1_000_000), None);
+    }
+
+    #[test]
+    fn parses_valid_packet_timestamp() {
+        assert_eq!(
+            safe_packet_timestamp(12, 345_678),
+            Some(Duration::new(12, 345_678_000))
+        );
+    }
 }

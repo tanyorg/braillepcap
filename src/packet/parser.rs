@@ -128,6 +128,11 @@ pub fn process_ip_payload(
         return None;
     }
 
+    let flags_fragment = u16::from_be_bytes([ip_data[6], ip_data[7]]);
+    if !target_ports.is_empty() && flags_fragment & 0x1fff != 0 {
+        return None;
+    }
+
     let src_ip_u32 = u32::from_be_bytes([ip_data[12], ip_data[13], ip_data[14], ip_data[15]]);
 
     // Fast-path CIDR exclusion check for source IP

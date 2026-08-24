@@ -10,6 +10,7 @@ mod ui;
 use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
 use crossterm::{
+    cursor::Show,
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -37,21 +38,12 @@ use packet::{expand_path, parse_cidr, spawn_capture_thread, BatchUpdate, CapEngi
 use rir::get_iana_rir;
 use ui::{get_color_and_style, BRAILLE_BIT_MAP, GRID_COLS, REQ_COLS, REQ_ROWS};
 
-fn has_root_privileges() -> bool {
-    #[cfg(target_family = "unix")]
-    {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .map(|output| {
-                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "0"
-            })
-            .unwrap_or(false)
-    }
+struct TerminalGuard;
 
-    #[cfg(not(target_family = "unix"))]
-    {
-        true
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
     }
 }
 
@@ -127,10 +119,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let iface = args.interface.clone().unwrap_or_else(|| "en0".to_string());
 
-    if args.read_file.is_none() && !has_root_privileges() {
-        return Err("Live capture requires root privileges. Run with sudo or as root.".into());
-    }
-
     let omit_nets: Vec<CidrMatcher> = args
         .omit
         .iter()
@@ -166,9 +154,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CapEngine::Live(cap)
     };
 
-    let (tx, rx) = mpsc::channel::<BatchUpdate>();
+    let (tx, rx) = mpsc::sync_channel::<BatchUpdate>(64);
     let ports = args.port.clone();
-    let replay_speed = args.speed;
+    let replay_speed = if args.speed.is_finite() {
+        args.speed.clamp(0.0, 1000.0)
+    } else {
+        1.0
+    };
 
     spawn_capture_thread(engine, tx, ports, replay_speed, omit_nets);
 
@@ -176,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let _terminal_guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -186,11 +179,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let hold_duration = Duration::from_secs_f64(hold_seconds);
 
-    let _speed = if args.speed.is_finite() {
-        args.speed.clamp(0.0, 1000.0)
-    } else {
-        1.0
-    };
     let mut activity = ActivityBuckets::new(Instant::now(), hold_duration);
     let mut detail_network_pps: HashMap<(u8, u8), usize> = HashMap::new();
     let mut detail_pps_accumulator: HashMap<(u8, u8), usize> = HashMap::new();
@@ -317,7 +305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if is_paused {
                     while rx.try_recv().is_ok() {}
                 } else {
-                    while let Ok(update) = rx.try_recv() {
+                    for _ in 0..64 {
+                        let Ok(update) = rx.try_recv() else { break };
                         packet_count += update.count;
 
                         if let Some(exact_pps) = update.pps_stat {
@@ -366,7 +355,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             AppMode::ZoomInput { .. } | AppMode::Detail { .. } => {
-                while let Ok(update) = rx.try_recv() {
+                for _ in 0..64 {
+                    let Ok(update) = rx.try_recv() else { break };
                     if update.pps_stat.is_some() {
                         if detail_has_complete_pps_window {
                             detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
@@ -558,11 +548,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         thread::sleep(Duration::from_millis(100));
     }
-
-    // Restore terminal configuration on exit
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
 
     Ok(())
 }

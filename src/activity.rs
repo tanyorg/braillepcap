@@ -29,6 +29,9 @@ pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
             let second = parts[1]
                 .parse::<u8>()
                 .map_err(|_| "Invalid IPv4 address. Use a.b /16".to_string())?;
+            if first > 252 || second > 252 {
+                return Err("Zoom start must be between 0 and 252".to_string());
+            }
             Ok((first, second))
         }
         4 => {
@@ -36,6 +39,9 @@ pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
                 .parse::<Ipv4Addr>()
                 .map_err(|_| "Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string())?;
             let octets = ip.octets();
+            if octets[0] > 252 || octets[1] > 252 {
+                return Err("Zoom start must be between 0 and 252".to_string());
+            }
             Ok((octets[0], octets[1]))
         }
         _ => Err("Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string()),
@@ -50,8 +56,12 @@ pub fn detail_activity_cells(
 
     for row in 0..4 {
         for col in 0..4 {
-            let oct1 = focus.0 + row as u8;
-            let oct2 = focus.1 + col as u8;
+            let Some(oct1) = focus.0.checked_add(row as u8) else {
+                continue;
+            };
+            let Some(oct2) = focus.1.checked_add(col as u8) else {
+                continue;
+            };
             let count = activity_by_network.get(&(oct1, oct2)).copied().unwrap_or(0);
             cells.push(((oct1, oct2), count));
         }
@@ -188,6 +198,8 @@ mod tests {
         assert!(parse_zoom_target("192.168.0.0/16").is_ok());
         assert!(parse_zoom_target("192").is_err());
         assert!(parse_zoom_target("256.168").is_err());
+        assert!(parse_zoom_target("253.0").is_err());
+        assert!(parse_zoom_target("252.253/16").is_err());
     }
 
     #[test]
