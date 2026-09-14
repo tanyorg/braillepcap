@@ -232,6 +232,10 @@ impl ActivityBuckets {
     pub fn reset(&mut self, now: Instant, hold_duration: Duration) {
         *self = Self::new(now, hold_duration);
     }
+
+    pub fn resume(&mut self, now: Instant) {
+        self.current_start = now;
+    }
 }
 
 #[cfg(test)]

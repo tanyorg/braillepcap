@@ -238,7 +238,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match &mut app_mode {
                     AppMode::Main => match key.code {
                         KeyCode::Char('q') => break,
-                        KeyCode::Char(' ') => is_paused = !is_paused,
+                        KeyCode::Char(' ') => {
+                            is_paused = !is_paused;
+                            if !is_paused {
+                                activity.resume(now);
+                            }
+                        }
                         KeyCode::Char('z') | KeyCode::Char('Z') => {
                             detail_network_pps.clear();
                             detail_pps_accumulator.clear();
@@ -344,10 +349,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match app_mode {
             AppMode::Main => {
-                activity.advance(now);
                 if is_paused {
                     while rx.try_recv().is_ok() {}
                 } else {
+                    activity.advance(now);
                     for _ in 0..64 {
                         let Ok(update) = rx.try_recv() else { break };
                         packet_count += update.count;
