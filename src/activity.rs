@@ -56,6 +56,19 @@ pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
     }
 }
 
+pub fn parse_address_target(value: &str) -> Result<(u8, u8, u8, u8), String> {
+    let trimmed = value.trim();
+    let (host, prefix) = trimmed.split_once('/').unwrap_or((trimmed, "32"));
+    if prefix.trim() != "32" {
+        return Err("Only /32 addresses are supported in the --net detail view.".to_string());
+    }
+
+    let address = host
+        .parse::<Ipv4Addr>()
+        .map_err(|_| "Invalid IPv4 address. Use a.b.c.d/32".to_string())?;
+    Ok(address.octets().into())
+}
+
 pub fn detail_activity_cells(
     focus: (u8, u8),
     activity_by_network: &HashMap<(u8, u8), usize>,
@@ -73,6 +86,39 @@ pub fn detail_activity_cells(
             let count = activity_by_network.get(&(oct1, oct2)).copied().unwrap_or(0);
             cells.push(((oct1, oct2), count));
         }
+    }
+
+    cells
+}
+
+pub fn address_detail_activity_cells(
+    focus: (u8, u8, u8, u8),
+    activity_by_address: &HashMap<(u8, u8, u8, u8), usize>,
+) -> Vec<((u8, u8, u8, u8), (u8, u8, u8, u8), usize)> {
+    let first_address = u32::from(Ipv4Addr::new(focus.0, focus.1, focus.2, focus.3));
+    let mut cells = Vec::with_capacity(16);
+
+    for index in 0..16 {
+        let start = first_address.saturating_add((index * 4) as u32);
+        let end = start.saturating_add(3);
+        let start_octets = Ipv4Addr::from(start).octets();
+        let end_octets = Ipv4Addr::from(end).octets();
+        let count = (0..4)
+            .filter_map(|offset| {
+                let address = start.saturating_add(offset);
+                activity_by_address.get(&Ipv4Addr::from(address).octets().into())
+            })
+            .sum();
+        cells.push((
+            (
+                start_octets[0],
+                start_octets[1],
+                start_octets[2],
+                start_octets[3],
+            ),
+            (end_octets[0], end_octets[1], end_octets[2], end_octets[3]),
+            count,
+        ));
     }
 
     cells
@@ -195,7 +241,35 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{detail_activity_cells, display_coordinates, parse_zoom_target, ActivityBuckets};
+    use super::{
+        address_detail_activity_cells, detail_activity_cells, display_coordinates,
+        parse_address_target, parse_zoom_target, ActivityBuckets,
+    };
+
+    #[test]
+    fn parse_address_target_accepts_only_ipv4_addresses() {
+        assert_eq!(parse_address_target("133.5.60.0").unwrap(), (133, 5, 60, 0));
+        assert_eq!(
+            parse_address_target("133.5.60.0/32").unwrap(),
+            (133, 5, 60, 0)
+        );
+        assert!(parse_address_target("133.5.60.0/16").is_err());
+        assert!(parse_address_target("133.5.60").is_err());
+    }
+
+    #[test]
+    fn address_detail_cells_group_four_consecutive_addresses() {
+        let activity = HashMap::from([
+            ((133, 5, 60, 0), 1),
+            ((133, 5, 60, 1), 2),
+            ((133, 5, 60, 2), 3),
+            ((133, 5, 60, 3), 4),
+        ]);
+        let cells = address_detail_activity_cells((133, 5, 60, 0), &activity);
+        assert_eq!(cells[0].0, (133, 5, 60, 0));
+        assert_eq!(cells[0].1, (133, 5, 60, 3));
+        assert_eq!(cells[0].2, 10);
+    }
 
     #[test]
     fn net_mode_displays_each_ipv4_address_as_a_dot() {

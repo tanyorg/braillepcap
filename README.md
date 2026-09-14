@@ -91,6 +91,11 @@ Invalid IPv4 values, unsupported CIDR prefixes, and reserved Class D/E or
 `0.0.0.0/8` ranges are rejected with an error. Loopback (`127.0.0.0/8`) and
 link-local (`169.254.0.0/16`) ranges remain available for inspection.
 
+When `--net` is specified, the detail input accepts an IPv4 address in `/32`
+form, for example `133.5.60.0` or `133.5.60.0/32`. Each detail cell represents
+four consecutive `/32` addresses, such as `133.5.60.0-3`, and the same 4x4
+layout is used. The entered address must be inside the observed `/16` network.
+
 ## How to Read the Grid
 
 - Vertical Axis (Y): First IPv4 Octet (0 – 223)

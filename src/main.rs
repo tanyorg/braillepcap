@@ -33,7 +33,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use activity::{detail_activity_cells, display_coordinates, parse_zoom_target, ActivityBuckets};
+use activity::{
+    address_detail_activity_cells, detail_activity_cells, display_coordinates,
+    parse_address_target, parse_zoom_target, ActivityBuckets,
+};
 use cli::Args;
 use packet::{expand_path, parse_cidr, spawn_capture_thread, BatchUpdate, CapEngine, CidrMatcher};
 use rir::get_iana_rir;
@@ -93,8 +96,14 @@ enum AppMode {
         error: Option<String>,
     },
     Detail {
-        focus: (u8, u8),
+        focus: DetailFocus,
     },
+}
+
+#[derive(Clone, Debug)]
+enum DetailFocus {
+    Network16((u8, u8)),
+    Address32((u8, u8, u8, u8)),
 }
 
 fn reset_screen_state(
@@ -197,6 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut activity = ActivityBuckets::new(Instant::now(), hold_duration);
     let mut detail_network_pps: HashMap<(u8, u8), usize> = HashMap::new();
     let mut detail_pps_accumulator: HashMap<(u8, u8), usize> = HashMap::new();
+    let mut detail_address_pps: HashMap<(u8, u8, u8, u8), usize> = HashMap::new();
+    let mut detail_address_accumulator: HashMap<(u8, u8, u8, u8), usize> = HashMap::new();
     let mut detail_pps_window_start = Instant::now();
     let mut detail_has_complete_pps_window = false;
     let mut rir_counter: HashMap<&'static str, usize> = HashMap::new();
@@ -231,6 +242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('z') | KeyCode::Char('Z') => {
                             detail_network_pps.clear();
                             detail_pps_accumulator.clear();
+                            detail_address_pps.clear();
+                            detail_address_accumulator.clear();
                             detail_pps_window_start = Instant::now();
                             detail_has_complete_pps_window = false;
                             app_mode = AppMode::ZoomInput {
@@ -268,15 +281,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             terminal.clear()?;
                         }
+                        KeyCode::Enter if args.net.is_some() => match parse_address_target(value) {
+                            Ok(address) => {
+                                let ip = u32::from(Ipv4Addr::new(
+                                    address.0, address.1, address.2, address.3,
+                                ));
+                                if observe_net.is_some_and(|net| net.matches(ip)) {
+                                    app_mode = AppMode::Detail {
+                                        focus: DetailFocus::Address32(address),
+                                    };
+                                } else {
+                                    *error = Some(
+                                        "Address is outside the observed /16 network.".to_string(),
+                                    );
+                                }
+                            }
+                            Err(msg) => *error = Some(msg),
+                        },
                         KeyCode::Enter => match parse_zoom_target(value) {
                             Ok((oct1, oct2)) => {
                                 app_mode = AppMode::Detail {
-                                    focus: (oct1, oct2),
+                                    focus: DetailFocus::Network16((oct1, oct2)),
                                 };
                             }
-                            Err(msg) => {
-                                *error = Some(msg);
-                            }
+                            Err(msg) => *error = Some(msg),
                         },
                         KeyCode::Backspace | KeyCode::Delete => {
                             value.pop();
@@ -375,20 +403,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Ok(update) = rx.try_recv() else { break };
                     if update.pps_stat.is_some() {
                         if detail_has_complete_pps_window {
-                            detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                            if args.net.is_some() {
+                                detail_address_pps =
+                                    std::mem::take(&mut detail_address_accumulator);
+                            } else {
+                                detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                            }
                         } else {
-                            detail_pps_accumulator.clear();
+                            if args.net.is_some() {
+                                detail_address_accumulator.clear();
+                            } else {
+                                detail_pps_accumulator.clear();
+                            }
                             detail_has_complete_pps_window = true;
                         }
                         detail_pps_window_start = now;
                     }
-                    for (oct1, oct2, _oct3, _oct4) in update.dots {
-                        *detail_pps_accumulator.entry((oct1, oct2)).or_insert(0) += 1;
+                    for (oct1, oct2, oct3, oct4) in update.dots {
+                        if args.net.is_some() {
+                            *detail_address_accumulator
+                                .entry((oct1, oct2, oct3, oct4))
+                                .or_insert(0) += 1;
+                        } else {
+                            *detail_pps_accumulator.entry((oct1, oct2)).or_insert(0) += 1;
+                        }
                     }
                     if update.pps_stat.is_none()
                         && now.duration_since(detail_pps_window_start) >= Duration::from_secs(1)
                     {
-                        detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        if args.net.is_some() {
+                            detail_address_pps = std::mem::take(&mut detail_address_accumulator);
+                        } else {
+                            detail_network_pps = std::mem::take(&mut detail_pps_accumulator);
+                        }
                         detail_pps_window_start = now;
                     }
                 }
@@ -519,8 +566,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .title("Zoom /16")
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan));
+                    let prompt = if args.net.is_some() {
+                        "Enter an IPv4 address in /32 form (e.g. 133.5.60.0)"
+                    } else {
+                        "Enter the first two octets in /16 form (e.g. 10.10)"
+                    };
                     let mut lines = vec![
-                        Line::from("Enter the first two octets in /16 form (e.g. 10.10)"),
+                        Line::from(prompt),
                         Line::from(format!("> {}", value)),
                     ];
                     if let Some(err) = error {
@@ -544,8 +596,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let block = Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow));
-                    let detail_activity = detail_activity_cells(*focus, &detail_network_pps);
                     let mut detail_lines = Vec::new();
+                    let detail_cells = match focus {
+                        DetailFocus::Network16(focus) => detail_activity_cells(*focus, &detail_network_pps)
+                            .into_iter()
+                            .map(|((oct1, oct2), count)| {
+                                (format!("{}.{}.0.0/16", oct1, oct2), count)
+                            })
+                            .collect::<Vec<_>>(),
+                        DetailFocus::Address32(focus) => address_detail_activity_cells(*focus, &detail_address_pps)
+                            .into_iter()
+                            .map(|(start, end, count)| {
+                                let label = if start.0 == end.0
+                                    && start.1 == end.1
+                                    && start.2 == end.2
+                                {
+                                    format!(
+                                        "{}.{}.{}.{}-{}",
+                                        start.0, start.1, start.2, start.3, end.3
+                                    )
+                                } else {
+                                    format!(
+                                        "{}.{}.{}.{}-{}.{}.{}.{}",
+                                        start.0, start.1, start.2, start.3,
+                                        end.0, end.1, end.2, end.3
+                                    )
+                                };
+                                (
+                                    label,
+                                    count,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    };
 
                     for row_idx in 0..4 {
                         let mut cells = Vec::new();
@@ -554,9 +637,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 cells.push(Span::raw(" |"));
                             }
                             let idx = row_idx * 4 + col_idx;
-                            let ((oct1, oct2), count) = detail_activity[idx];
-                            let label = format!("{}.{}.0.0/16", oct1, oct2);
-                            let score_style = get_color_and_style(count);
+                            let (label, count) = &detail_cells[idx];
+                            let score_style = get_color_and_style(*count);
                             let cell = format!("{:<15} {:>4}", label, count);
                             cells.push(Span::styled(cell, score_style));
                         }
