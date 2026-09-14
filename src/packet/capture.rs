@@ -72,7 +72,9 @@ pub fn spawn_capture_thread(
                         }
                     }
 
-                    pcap_sec_count += 1;
+                    if observe_net.is_none() {
+                        pcap_sec_count += 1;
+                    }
 
                     if let Some((oct1, oct2, oct3, oct4)) = parse_packet(
                         packet.data,
@@ -81,6 +83,9 @@ pub fn spawn_capture_thread(
                         &omit_nets,
                         observe_net.as_ref(),
                     ) {
+                        if observe_net.is_some() {
+                            pcap_sec_count += 1;
+                        }
                         batch.push((oct1, oct2, oct3, oct4));
                     }
 
