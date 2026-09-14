@@ -9,6 +9,14 @@ use std::{
 
 pub const ACTIVITY_BUCKET_WIDTH: Duration = Duration::from_millis(100);
 
+pub fn display_coordinates(net_mode: bool, octets: (u8, u8, u8, u8)) -> (u8, u8) {
+    if net_mode {
+        (octets.2, octets.3)
+    } else {
+        (octets.0, octets.1)
+    }
+}
+
 pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
     let trimmed = value.trim();
     let host = if let Some((left, prefix)) = trimmed.split_once('/') {
@@ -187,7 +195,14 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{detail_activity_cells, parse_zoom_target, ActivityBuckets};
+    use super::{detail_activity_cells, display_coordinates, parse_zoom_target, ActivityBuckets};
+
+    #[test]
+    fn net_mode_displays_each_ipv4_address_as_a_dot() {
+        let address = (192, 168, 12, 34);
+        assert_eq!(display_coordinates(true, address), (12, 34));
+        assert_eq!(display_coordinates(false, address), (192, 168));
+    }
 
     #[test]
     fn parse_zoom_target_accepts_first_two_octets_in_16_form() {

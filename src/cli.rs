@@ -31,6 +31,10 @@ pub struct Args {
     #[arg(short, long, value_delimiter = ' ', value_name = "CIDR")]
     pub omit: Vec<String>,
 
+    /// Observe one IPv4 /16 network, with one dot per IPv4 address
+    #[arg(long, value_name = "CIDR")]
+    pub net: Option<String>,
+
     /// Capture buffer size in MB for live capture
     #[arg(short = 'b', long = "buffer-size", default_value_t = 8)]
     pub buffer_size: u32,

@@ -23,6 +23,7 @@ pub fn spawn_capture_thread(
     ports: Vec<u16>,
     replay_speed: f64,
     omit_nets: Vec<CidrMatcher>,
+    observe_net: Option<CidrMatcher>,
 ) {
     thread::spawn(move || {
         let mut batch = Vec::with_capacity(10000);
@@ -73,10 +74,14 @@ pub fn spawn_capture_thread(
 
                     pcap_sec_count += 1;
 
-                    if let Some((oct1, oct2, oct3)) =
-                        parse_packet(packet.data, datalink, &ports, &omit_nets)
-                    {
-                        batch.push((oct1, oct2, oct3));
+                    if let Some((oct1, oct2, oct3, oct4)) = parse_packet(
+                        packet.data,
+                        datalink,
+                        &ports,
+                        &omit_nets,
+                        observe_net.as_ref(),
+                    ) {
+                        batch.push((oct1, oct2, oct3, oct4));
                     }
 
                     if batch.len() >= 10000
@@ -113,10 +118,14 @@ pub fn spawn_capture_thread(
                 loop {
                     match cap.next_packet() {
                         Ok(packet) => {
-                            if let Some((oct1, oct2, oct3)) =
-                                parse_packet(packet.data, datalink, &ports, &omit_nets)
-                            {
-                                batch.push((oct1, oct2, oct3));
+                            if let Some((oct1, oct2, oct3, oct4)) = parse_packet(
+                                packet.data,
+                                datalink,
+                                &ports,
+                                &omit_nets,
+                                observe_net.as_ref(),
+                            ) {
+                                batch.push((oct1, oct2, oct3, oct4));
                             }
                         }
                         Err(pcap::Error::TimeoutExpired) => {}
@@ -161,7 +170,8 @@ pub fn parse_packet(
     linktype: Linktype,
     target_ports: &[u16],
     omit_nets: &[CidrMatcher],
-) -> Option<(u8, u8, u8)> {
+    observe_net: Option<&CidrMatcher>,
+) -> Option<(u8, u8, u8, u8)> {
     let l2_offset = calculate_l2_offset(linktype, data)?;
 
     if data.len() < l2_offset + 20 {
@@ -169,7 +179,7 @@ pub fn parse_packet(
     }
 
     let ip_data = &data[l2_offset..];
-    process_ip_payload(ip_data, target_ports, omit_nets)
+    process_ip_payload(ip_data, target_ports, omit_nets, observe_net)
 }
 
 #[cfg(test)]

@@ -112,7 +112,8 @@ pub fn process_ip_payload(
     ip_data: &[u8],
     target_ports: &[u16],
     omit_nets: &[CidrMatcher],
-) -> Option<(u8, u8, u8)> {
+    observe_net: Option<&CidrMatcher>,
+) -> Option<(u8, u8, u8, u8)> {
     if ip_data.len() < 20 {
         return None;
     }
@@ -138,6 +139,12 @@ pub fn process_ip_payload(
     // Fast-path CIDR exclusion check for source IP
     if should_exclude(src_ip_u32, omit_nets) {
         return None;
+    }
+
+    if let Some(net) = observe_net {
+        if !net.matches(src_ip_u32) {
+            return None;
+        }
     }
 
     let src_oct1 = ip_data[12];
@@ -168,7 +175,7 @@ pub fn process_ip_payload(
         }
     }
 
-    Some((src_oct1, src_oct2, src_oct3))
+    Some((src_oct1, src_oct2, src_oct3, ip_data[15]))
 }
 
 #[cfg(test)]
@@ -196,23 +203,23 @@ mod tests {
     #[test]
     fn inbound_port_filter_uses_destination_port_only() {
         let packet_to_target = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 54321, 443, 6);
-        assert!(process_ip_payload(&packet_to_target, &[443], &[]).is_some());
+        assert!(process_ip_payload(&packet_to_target, &[443], &[], None).is_some());
 
         let response_from_target =
             make_ipv4_packet([10, 0, 0, 5], [192, 168, 1, 10], 443, 54321, 6);
-        assert!(process_ip_payload(&response_from_target, &[443], &[]).is_none());
+        assert!(process_ip_payload(&response_from_target, &[443], &[], None).is_none());
     }
 
     #[test]
     fn inbound_port_filter_rejects_non_tcp_udp_packets() {
         let icmp_packet = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 0, 0, 1);
-        assert!(process_ip_payload(&icmp_packet, &[443], &[]).is_none());
+        assert!(process_ip_payload(&icmp_packet, &[443], &[], None).is_none());
     }
 
     #[test]
     fn inbound_port_filter_accepts_matching_destination_port_for_udp() {
         let udp_packet = make_ipv4_packet([192, 168, 1, 10], [10, 0, 0, 5], 55555, 53, 17);
-        assert!(process_ip_payload(&udp_packet, &[53], &[]).is_some());
+        assert!(process_ip_payload(&udp_packet, &[53], &[], None).is_some());
     }
 
     #[test]
@@ -222,7 +229,8 @@ mod tests {
         assert!(process_ip_payload(
             &packet,
             &[443],
-            &[CidrMatcher::new(u32::from(omitted_net), 24)]
+            &[CidrMatcher::new(u32::from(omitted_net), 24)],
+            None
         )
         .is_none());
 
@@ -230,9 +238,23 @@ mod tests {
         assert!(process_ip_payload(
             &allowed_packet,
             &[443],
-            &[CidrMatcher::new(u32::from(omitted_net), 24)]
+            &[CidrMatcher::new(u32::from(omitted_net), 24)],
+            None
         )
         .is_some());
+    }
+
+    #[test]
+    fn observe_net_filters_packets_and_returns_the_full_ipv4_address() {
+        let observed = parse_cidr("192.168.0.0/16").unwrap();
+        let packet = make_ipv4_packet([192, 168, 12, 34], [10, 0, 0, 5], 12345, 443, 6);
+        assert_eq!(
+            process_ip_payload(&packet, &[], &[], Some(&observed)),
+            Some((192, 168, 12, 34))
+        );
+
+        let outside = make_ipv4_packet([192, 169, 12, 34], [10, 0, 0, 5], 12345, 443, 6);
+        assert!(process_ip_payload(&outside, &[], &[], Some(&observed)).is_none());
     }
 
     #[test]

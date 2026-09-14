@@ -57,6 +57,7 @@ LIBPCAP_VER=1.10.0 cargo build --release
 | `--hold-time <SECS>` | `-t` | Dot persistence duration in seconds | `0.5` |
 | `--port <PORTS...>` | `-p` | Filter by port numbers (e.g., `-p 80 443`) | - |
 | `--omit <CIDR...>` | `-o` | Exclude IP networks in CIDR notation | - |
+| `--net <CIDR>` | - | Observe one IPv4 `/16`; each IPv4 address is one dot | - |
 | `--buffer-size <MB>` | `-b` | Capture buffer size in MB for live capture | `8` |
 | `--help` | `-h` | Print help information | - |
 | `--version` | `-V` | Print version information | - |
@@ -69,7 +70,14 @@ sudo cargo run --release -- -i en0
 
 # Read pcap file
 cargo run --release -- -r sample.pcap
+
+# Observe 192.168.0.0/16, with one dot per IPv4 address
+cargo run --release -- --net 192.168.0.0/16 -r sample.pcap
 ```
+
+When `--net` is specified, the grid shows the third IPv4 octet vertically and
+the fourth octet horizontally, so all 65,536 addresses in the selected `/16`
+can be observed individually. The selected network must use a `/16` prefix.
 
 ### Detail View
 

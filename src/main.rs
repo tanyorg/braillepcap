@@ -27,12 +27,13 @@ use ratatui::{
 use std::{
     collections::HashMap,
     io,
+    net::Ipv4Addr,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
-use activity::{detail_activity_cells, parse_zoom_target, ActivityBuckets};
+use activity::{detail_activity_cells, display_coordinates, parse_zoom_target, ActivityBuckets};
 use cli::Args;
 use packet::{expand_path, parse_cidr, spawn_capture_thread, BatchUpdate, CapEngine, CidrMatcher};
 use rir::get_iana_rir;
@@ -127,6 +128,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let observe_net = args
+        .net
+        .as_deref()
+        .map(parse_cidr)
+        .transpose()?
+        .map(|matcher| {
+            if matcher.mask != 0xffff_0000 {
+                Err("--net only supports IPv4 networks with a /16 prefix".to_string())
+            } else {
+                Ok(matcher)
+            }
+        })
+        .transpose()?;
+
     let safe_buffer_size = args.buffer_size.clamp(1, 1024);
     let buffer_size_mb = safe_buffer_size as usize;
     let buf_bytes = buffer_size_mb
@@ -162,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1.0
     };
 
-    spawn_capture_thread(engine, tx, ports, replay_speed, omit_nets);
+    spawn_capture_thread(engine, tx, ports, replay_speed, omit_nets, observe_net);
 
     // Terminal display setup
     enable_raw_mode()?;
@@ -329,8 +344,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        for (oct1, oct2, _oct3) in update.dots {
-                            activity.record(oct1, oct2, now);
+                        for octets @ (oct1, _, _, _) in update.dots {
+                            let (y, x) = display_coordinates(args.net.is_some(), octets);
+                            activity.record(y, x, now);
 
                             let rir = get_iana_rir(oct1);
                             *rir_delta.entry(rir).or_insert(0) += 1;
@@ -366,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         detail_pps_window_start = now;
                     }
-                    for (oct1, oct2, _oct3) in update.dots {
+                    for (oct1, oct2, _oct3, _oct4) in update.dots {
                         *detail_pps_accumulator.entry((oct1, oct2)).or_insert(0) += 1;
                     }
                     if update.pps_stat.is_none()
@@ -381,10 +397,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         terminal.draw(|f| {
             let size = f.area();
-            if size.width < REQ_COLS || size.height < REQ_ROWS {
+            let required_rows = if args.net.is_some() { REQ_ROWS + 8 } else { REQ_ROWS };
+            if size.width < REQ_COLS || size.height < required_rows {
                 let msg = Span::raw(format!(
                     "Screen too small: {}x{} (Required: {}x{})",
-                    size.width, size.height, REQ_COLS, REQ_ROWS
+                    size.width, size.height, REQ_COLS, required_rows
                 ));
                 f.render_widget(ratatui::widgets::Paragraph::new(msg), size);
                 return;
@@ -397,8 +414,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 format!(" [Ports: {:?}]", args.port)
             };
+            let net_ind = observe_net
+                .map(|matcher| format!(" [Net: {}/16]", Ipv4Addr::from(matcher.network)))
+                .unwrap_or_default();
             let pause_ind = if is_paused { " [PAUSED]" } else { "" };
-            let title_left = format!(" BraillePcap [{}{}]{} ", mode_label, pause_ind, port_ind);
+            let title_left = format!(
+                " BraillePcap [{}{}]{}{} ",
+                mode_label, pause_ind, net_ind, port_ind
+            );
             let total_width = size.width as usize;
             let time_len = current_time_str.len();
 
@@ -421,9 +444,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             top_border = top_chars.into_iter().collect();
             buf.set_string(0, 2, &top_border, Style::default());
-            buf.set_string(0, 59, &top_border, Style::default());
+            let grid_rows = if args.net.is_some() { 64 } else { 56 };
+            let bottom_border_y = grid_rows + 3;
+            let status_y = bottom_border_y + 1;
+            buf.set_string(0, bottom_border_y as u16, &top_border, Style::default());
 
-            for y in 0..56 {
+            for y in 0..grid_rows {
                 let scr_y = (y + 3) as u16;
                 buf.set_string(0, scr_y, format!("{:>3}|", y * 4), Style::default());
                 buf.set_string(133, scr_y, "|", Style::default());
@@ -475,7 +501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let status_text = format!(" PPS: {:<7} | {} ", pps, rir_text);
-            buf.set_string(0, 60, status_text, Style::default());
+            buf.set_string(0, status_y as u16, status_text, Style::default());
 
             match &app_mode {
                 AppMode::Main => {}
