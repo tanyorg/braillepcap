@@ -17,6 +17,22 @@ pub fn display_coordinates(net_mode: bool, octets: (u8, u8, u8, u8)) -> (u8, u8)
     }
 }
 
+/// Validates the first two octets of a /16 zoom target.
+/// 0.0.0.0/8 and class D/E (224.0.0.0 and above) are reserved and rejected.
+/// The second octet is limited to 252 so that the 4x4 window stays within 0-255.
+fn validate_zoom_start(first: u8, second: u8) -> Result<(u8, u8), String> {
+    if first == 0 {
+        return Err("0.0.0.0/8 is reserved and cannot be zoomed".to_string());
+    }
+    if first >= 224 {
+        return Err("Class D/E (224.0.0.0 and above) is reserved and cannot be zoomed".to_string());
+    }
+    if second > 252 {
+        return Err("Second octet must be between 0 and 252".to_string());
+    }
+    Ok((first, second))
+}
+
 pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
     let trimmed = value.trim();
     let host = if let Some((left, prefix)) = trimmed.split_once('/') {
@@ -37,20 +53,14 @@ pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
             let second = parts[1]
                 .parse::<u8>()
                 .map_err(|_| "Invalid IPv4 address. Use a.b /16".to_string())?;
-            if first > 252 || second > 252 {
-                return Err("Zoom start must be between 0 and 252".to_string());
-            }
-            Ok((first, second))
+            validate_zoom_start(first, second)
         }
         4 => {
             let ip = host
                 .parse::<Ipv4Addr>()
                 .map_err(|_| "Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string())?;
             let octets = ip.octets();
-            if octets[0] > 252 || octets[1] > 252 {
-                return Err("Zoom start must be between 0 and 252".to_string());
-            }
-            Ok((octets[0], octets[1]))
+            validate_zoom_start(octets[0], octets[1])
         }
         _ => Err("Invalid IPv4 address. Use a.b /16 or a.b.c.d/16".to_string()),
     }
@@ -293,6 +303,30 @@ mod tests {
         assert!(parse_zoom_target("256.168").is_err());
         assert!(parse_zoom_target("253.0").is_err());
         assert!(parse_zoom_target("252.253/16").is_err());
+    }
+
+    #[test]
+    fn parse_zoom_target_rejects_reserved_first_octets() {
+        for input in [
+            "0.0",
+            "0.1/16",
+            "0.0.0.0/16",
+            "224.0",
+            "224.0.0.0/16",
+            "239.1/16",
+            "240.0",
+            "252.0",
+        ] {
+            let err = parse_zoom_target(input).unwrap_err();
+            assert!(err.contains("reserved"), "{input}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_zoom_target_accepts_special_use_first_octets() {
+        assert_eq!(parse_zoom_target("1.0").unwrap(), (1, 0));
+        assert_eq!(parse_zoom_target("127.0/16").unwrap(), (127, 0));
+        assert_eq!(parse_zoom_target("223.252").unwrap(), (223, 252));
     }
 
     #[test]
