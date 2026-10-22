@@ -12,6 +12,9 @@ use std::{
 
 use super::BatchUpdate;
 
+/// Pause between empty reads on a non-blocking live capture handle
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
 pub enum CapEngine {
     File(Capture<pcap::Offline>),
     Live(Capture<pcap::Active>),
@@ -133,7 +136,11 @@ pub fn spawn_capture_thread(
                                 batch.push((oct1, oct2, oct3, oct4));
                             }
                         }
-                        Err(pcap::Error::TimeoutExpired) => {}
+                        Err(pcap::Error::TimeoutExpired) => {
+                            // The handle is non-blocking, so an empty read returns immediately.
+                            // Sleep briefly to avoid busy-waiting while the interface is idle.
+                            thread::sleep(IDLE_POLL_INTERVAL);
+                        }
                         Err(_) => break,
                     }
 
