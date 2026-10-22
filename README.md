@@ -90,6 +90,9 @@ in the terminal and updates while capture continues.
 Invalid IPv4 values, unsupported CIDR prefixes, and reserved Class D/E or
 `0.0.0.0/8` ranges are rejected with an error. Loopback (`127.0.0.0/8`) and
 link-local (`169.254.0.0/16`) ranges remain available for inspection.
+If the second octet is greater than 252, the 4x4 window is shifted to start at
+column 252 so that it stays within 0-255. For example, `169.254` shows the
+columns `252` through `255` of rows `169` through `172`.
 
 When `--net` is specified, the detail input accepts an IPv4 address in `/32`
 form, for example `192.168.60.0` or `192.168.60.0/32`. Each detail cell represents

@@ -17,9 +17,13 @@ pub fn display_coordinates(net_mode: bool, octets: (u8, u8, u8, u8)) -> (u8, u8)
     }
 }
 
-/// Validates the first two octets of a /16 zoom target.
+/// Highest second octet that still leaves room for a 4-column detail window.
+const MAX_ZOOM_SECOND_START: u8 = 252;
+
+/// Validates the first two octets of a /16 zoom target and returns the window start.
 /// 0.0.0.0/8 and class D/E (224.0.0.0 and above) are reserved and rejected.
-/// The second octet is limited to 252 so that the 4x4 window stays within 0-255.
+/// A second octet above 252 is clamped to 252 so that the 4x4 window always has
+/// 16 cells and stays within 0-255 (e.g. 169.254 is shown in columns 252-255).
 fn validate_zoom_start(first: u8, second: u8) -> Result<(u8, u8), String> {
     if first == 0 {
         return Err("0.0.0.0/8 is reserved and cannot be zoomed".to_string());
@@ -27,10 +31,7 @@ fn validate_zoom_start(first: u8, second: u8) -> Result<(u8, u8), String> {
     if first >= 224 {
         return Err("Class D/E (224.0.0.0 and above) is reserved and cannot be zoomed".to_string());
     }
-    if second > 252 {
-        return Err("Second octet must be between 0 and 252".to_string());
-    }
-    Ok((first, second))
+    Ok((first, second.min(MAX_ZOOM_SECOND_START)))
 }
 
 pub fn parse_zoom_target(value: &str) -> Result<(u8, u8), String> {
@@ -303,6 +304,7 @@ mod tests {
         assert!(parse_zoom_target("256.168").is_err());
         assert!(parse_zoom_target("253.0").is_err());
         assert!(parse_zoom_target("252.253/16").is_err());
+        assert_eq!(parse_zoom_target("10.253/16").unwrap(), (10, 252));
     }
 
     #[test]
@@ -327,6 +329,26 @@ mod tests {
         assert_eq!(parse_zoom_target("1.0").unwrap(), (1, 0));
         assert_eq!(parse_zoom_target("127.0/16").unwrap(), (127, 0));
         assert_eq!(parse_zoom_target("223.252").unwrap(), (223, 252));
+    }
+
+    #[test]
+    fn parse_zoom_target_clamps_second_octet_to_keep_a_full_window() {
+        assert_eq!(parse_zoom_target("10.252").unwrap(), (10, 252));
+        assert_eq!(parse_zoom_target("10.253").unwrap(), (10, 252));
+        assert_eq!(parse_zoom_target("10.255/16").unwrap(), (10, 252));
+        assert_eq!(parse_zoom_target("10.255.1.1/16").unwrap(), (10, 252));
+    }
+
+    #[test]
+    fn link_local_zoom_window_contains_169_254() {
+        let focus = parse_zoom_target("169.254/16").unwrap();
+        assert_eq!(focus, (169, 252));
+
+        let activity = HashMap::from([((169, 254), 7)]);
+        let cells = detail_activity_cells(focus, &activity);
+        assert_eq!(cells.len(), 16);
+        assert!(cells.contains(&((169, 254), 7)));
+        assert_eq!(cells.last().map(|c| c.0), Some((172, 255)));
     }
 
     #[test]
